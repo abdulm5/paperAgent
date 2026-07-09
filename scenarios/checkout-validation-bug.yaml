@@ -1,0 +1,17 @@
+id: checkout-validation-bug
+title: Checkout validation deploy causes 500 errors
+service: checkout-api
+severity: critical
+ground_truth:
+  faulty_commit: 8fa23c1
+  expected_runbook: checkout-api-rollback
+  root_cause: Missing validation branch throws on a subset of payment methods.
+  expected_impacted_requests: 1240
+timeline:
+  deploy_at: "2026-01-15T14:04:00Z"
+  first_failure_at: "2026-01-15T14:13:00Z"
+  alert_at: "2026-01-15T14:15:00Z"
+alert:
+  metric: http_server_error_rate
+  threshold: 0.05
+  window_seconds: 300

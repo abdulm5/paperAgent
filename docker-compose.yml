@@ -38,12 +38,72 @@ services:
       REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     volumes:
       - ./backend:/app
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+
+  checkout-api:
+    build:
+      context: ./simulator
+      target: development
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8100 --reload
+    ports:
+      - "8100:8100"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ./simulator:/app
+
+  alert-evaluator:
+    build:
+      context: ./simulator
+      target: development
+    command:
+      - python
+      - -m
+      - app.monitor
+      - --checkout-api-url
+      - http://checkout-api:8100
+      - --pageragent-api-url
+      - http://backend:8000
+      - --threshold
+      - "${ALERT_ERROR_RATE_THRESHOLD:-0.05}"
+      - --minimum-requests
+      - "${ALERT_MINIMUM_REQUESTS:-60}"
+      - --window-seconds
+      - "${ALERT_WINDOW_SECONDS:-300}"
+      - --poll-interval
+      - "0.5"
+    volumes:
+      - ./simulator:/app
+    depends_on:
+      backend:
+        condition: service_healthy
+      checkout-api:
+        condition: service_healthy
+
+  traffic-generator:
+    profiles: ["tools"]
+    build:
+      context: ./simulator
+      target: development
+    entrypoint: ["python", "-m", "app.traffic", "--base-url", "http://checkout-api:8100"]
+    volumes:
+      - ./simulator:/app
+    depends_on:
+      checkout-api:
         condition: service_healthy
 
   frontend:

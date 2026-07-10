@@ -4,7 +4,7 @@ PagerAgent is an evidence-grounded incident-response copilot. It helps an on-cal
 
 ## Project status
 
-**Milestone 0 — repository foundation.** The repository currently provides a runnable API health check, a frontend shell, local infrastructure, and the contracts that will guide the first end-to-end incident. It intentionally does not yet make AI decisions or modify production systems.
+**Milestone 1 — deterministic outage and alert ingestion.** The repository can now replay a checkout validation incident from healthy traffic through a faulty deploy and into a validated PagerAgent incident. Incident persistence, investigation, and AI analysis intentionally remain future milestones.
 
 ## The interview story
 
@@ -44,6 +44,15 @@ Once running:
 - API health: <http://localhost:8000/api/v1/health>
 - API documentation: <http://localhost:8000/docs>
 - Dashboard: <http://localhost:5173>
+- Simulated checkout API: <http://localhost:8100/docs>
+
+To replay the first incident automatically:
+
+```bash
+./scripts/run-demo.sh
+```
+
+The script sends 20 healthy requests, activates `faulty-v2`, sends 40 additional requests, and waits for PagerAgent to receive the threshold alert. The expected result is 8 failed digital-wallet requests and a 13.3% error rate over the complete 60-request window.
 
 For local development outside Docker:
 
@@ -54,11 +63,11 @@ cd frontend && npm install && npm run dev
 
 ## Development milestones
 
-1. Foundation (current): project structure, local stack, and architectural contracts.
-2. Simulator: a checkout service, deterministic bad deploy, synthetic traffic, and alert ingestion.
-3. Incident core: persistence and a dashboard that renders an incident timeline.
+1. Foundation (complete): project structure, local stack, and architectural contracts.
+2. Simulator (complete): a checkout service, deterministic bad deploy, synthetic traffic, and alert ingestion.
+3. Incident core (next): persistence and a dashboard that renders an incident timeline.
 4. Evidence: telemetry parsing, commit ranking, and runbook retrieval.
 5. Copilot: grounded brief generation, approval workflow, and postmortem export.
 6. Evaluation: reproducible scenarios, benchmark metrics, and regression gates in CI.
 
-See [the architecture guide](docs/architecture.md) for the system boundary and [the decision records](docs/decisions/) for the rationale behind the design.
+See [the architecture guide](docs/architecture.md), [milestone 1 walkthrough](docs/milestones/01-outage-simulator.md), and [decision records](docs/decisions/) for the rationale behind the design.

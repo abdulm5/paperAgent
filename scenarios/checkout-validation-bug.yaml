@@ -6,12 +6,21 @@ ground_truth:
   faulty_commit: 8fa23c1
   expected_runbook: checkout-api-rollback
   root_cause: Missing validation branch throws on a subset of payment methods.
-  expected_impacted_requests: 1240
-timeline:
-  deploy_at: "2026-01-15T14:04:00Z"
-  first_failure_at: "2026-01-15T14:13:00Z"
-  alert_at: "2026-01-15T14:15:00Z"
+  affected_payment_method: digital_wallet
+  expected_impacted_requests: 8
+releases:
+  stable:
+    name: stable-v1
+    commit: 2ab1e90
+  faulty:
+    name: faulty-v2
+    commit: 8fa23c1
+traffic:
+  healthy_requests: 20
+  outage_requests: 40
+  digital_wallet_frequency: 5
 alert:
   metric: http_server_error_rate
   threshold: 0.05
   window_seconds: 300
+  minimum_requests: 60

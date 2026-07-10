@@ -18,10 +18,11 @@ wait_for_url() {
   return 1
 }
 
-echo "Starting PagerAgent, checkout-api, and the alert evaluator..."
-docker compose up --detach --build backend checkout-api alert-evaluator
+echo "Starting PagerAgent, checkout-api, the alert evaluator, and dashboard..."
+docker compose up --detach --build backend checkout-api alert-evaluator frontend
 wait_for_url "http://localhost:8000/api/v1/health" "PagerAgent API"
 wait_for_url "http://localhost:8100/health" "Checkout API"
+wait_for_url "http://localhost:5173" "PagerAgent dashboard"
 
 echo "Resetting previous demo state..."
 curl --fail --silent --request DELETE http://localhost:8000/api/v1/dev/incidents >/dev/null
@@ -45,6 +46,7 @@ for _ in {1..20}; do
   if [[ "$incidents" != "[]" ]]; then
     printf '%s' "$incidents" | python3 -m json.tool
     echo "Demo complete: PagerAgent received the incident."
+    echo "Open http://localhost:5173 to inspect and advance the response."
     exit 0
   fi
   sleep 0.5

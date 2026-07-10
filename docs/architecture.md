@@ -24,11 +24,11 @@ The LLM is deliberately downstream of evidence gathering. It can summarize, comp
 
 ## Components and ownership
 
-| Component | Initial responsibility | Later responsibility |
+| Component | Current responsibility | Later responsibility |
 | --- | --- | --- |
 | `simulator/` | Generate a checkout failure and alert | Reproduce all benchmark scenarios |
-| `backend/` | Receive alerts and expose health | Persist incidents, collect evidence, rank hypotheses, enforce policy |
-| `frontend/` | Show the build shell | Serve as the incident command center |
+| `backend/` | Persist incidents, deduplicate alerts, and enforce lifecycle rules | Collect evidence, rank hypotheses, enforce policy |
+| `frontend/` | Present the incident queue, evidence, timeline, and operator controls | Add investigation hypotheses and approval workflows |
 | `runbooks/` | Hold versioned operational knowledge | Source grounded mitigation steps |
 | `scenarios/` | Describe known outage ground truth | Define reproducible test fixtures |
 | `evals/` | Define measurement approach | Run regression benchmarks in CI |
@@ -39,4 +39,6 @@ The first full incident is `checkout-validation-bug`. It has one service, one in
 
 ## Data boundaries
 
-The future persistence layer will keep raw telemetry immutable and store derived claims separately. A claim such as `suspected_commit` must include its score, ranker version, and references to supporting telemetry and deploy records. That data model enables reproducibility and makes postmortems auditable.
+PostgreSQL separates current incident state from immutable alert deliveries and append-only lifecycle events. The API updates current state and appends its matching event in one transaction.
+
+The next evidence layer will keep collected telemetry immutable and store derived claims separately. A claim such as `suspected_commit` must include its score, ranker version, and references to supporting telemetry and deploy records. That data model enables reproducibility and makes postmortems auditable.

@@ -5,7 +5,16 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.db.models import AlertRecord, IncidentEventRecord, IncidentRecord
+from app.db.models import (
+    AlertRecord,
+    CommitCandidateRecord,
+    ErrorClusterRecord,
+    EvidenceArtifactRecord,
+    IncidentEventRecord,
+    IncidentRecord,
+    InvestigationRunRecord,
+    RunbookMatchRecord,
+)
 from app.domain.incidents import (
     AlertPayload,
     AlertSeverity,
@@ -159,6 +168,11 @@ class IncidentService:
 
     def clear(self) -> int:
         count = len(self.session.scalars(select(IncidentRecord.id)).all())
+        self.session.execute(delete(RunbookMatchRecord))
+        self.session.execute(delete(CommitCandidateRecord))
+        self.session.execute(delete(ErrorClusterRecord))
+        self.session.execute(delete(EvidenceArtifactRecord))
+        self.session.execute(delete(InvestigationRunRecord))
         self.session.execute(delete(IncidentEventRecord))
         self.session.execute(delete(AlertRecord))
         self.session.execute(delete(IncidentRecord))

@@ -56,6 +56,86 @@ export interface IncidentDetail extends IncidentSummary {
   events: IncidentEvent[];
 }
 
+export type InvestigationStatus = "running" | "completed" | "failed";
+
+export interface EvidenceArtifact {
+  id: string;
+  kind: string;
+  source_uri: string;
+  content_hash: string;
+  payload: Record<string, unknown>;
+  collected_at: string;
+}
+
+export interface ErrorCluster {
+  id: string;
+  signature: string;
+  error_type: string;
+  endpoint: string;
+  affected_attributes: Record<string, unknown>;
+  failure_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  sample_request_ids: string[];
+  evidence_ids: string[];
+}
+
+export interface CommitCandidate {
+  id: string;
+  commit_sha: string;
+  rank: number;
+  total_score: number;
+  title: string;
+  author: string;
+  committed_at: string;
+  files_changed: string[];
+  diff_summary: string;
+  feature_scores: Record<string, number>;
+  explanation: string[];
+  evidence_ids: string[];
+}
+
+export interface RunbookMatch {
+  id: string;
+  runbook_id: string;
+  rank: number;
+  title: string;
+  service: string;
+  failure_mode: string;
+  total_score: number;
+  score_breakdown: Record<string, number>;
+  matched_sections: Array<{ heading: string; excerpt: string }>;
+  content_hash: string;
+  evidence_ids: string[];
+}
+
+export interface InvestigationDetail {
+  id: string;
+  incident_id: string;
+  status: InvestigationStatus;
+  collector_version: string;
+  clusterer_version: string;
+  ranker_version: string;
+  retrieval_version: string;
+  input_hash: string;
+  failure_reason: string | null;
+  started_at: string;
+  completed_at: string | null;
+  evidence: EvidenceArtifact[];
+  error_clusters: ErrorCluster[];
+  commit_candidates: CommitCandidate[];
+  runbook_matches: RunbookMatch[];
+}
+
+export class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json", ...init?.headers },
@@ -63,7 +143,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(body?.detail ?? `Request failed with status ${response.status}`);
+    throw new ApiError(body?.detail ?? `Request failed with status ${response.status}`, response.status);
   }
   return response.json() as Promise<T>;
 }
@@ -90,5 +170,24 @@ export function transitionIncident(
       actor: "demo-operator",
       note: note || null,
     }),
+  });
+}
+
+export async function getLatestInvestigation(
+  incidentId: string,
+): Promise<InvestigationDetail | null> {
+  try {
+    return await request<InvestigationDetail>(
+      `/api/v1/incidents/${incidentId}/investigations/latest`,
+    );
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  }
+}
+
+export function runInvestigation(incidentId: string): Promise<InvestigationDetail> {
+  return request<InvestigationDetail>(`/api/v1/incidents/${incidentId}/investigations`, {
+    method: "POST",
   });
 }

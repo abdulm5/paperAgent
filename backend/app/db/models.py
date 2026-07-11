@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, Uuid, func
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, Integer, String, Text, Uuid, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -48,6 +48,12 @@ class IncidentRecord(Base):
         order_by="IncidentEventRecord.created_at",
         passive_deletes=True,
     )
+    investigations: Mapped[list["InvestigationRunRecord"]] = relationship(
+        back_populates="incident",
+        cascade="all, delete-orphan",
+        order_by="InvestigationRunRecord.started_at",
+        passive_deletes=True,
+    )
 
 
 class AlertRecord(Base):
@@ -88,3 +94,150 @@ class IncidentEventRecord(Base):
     )
 
     incident: Mapped[IncidentRecord] = relationship(back_populates="events")
+
+
+class InvestigationRunRecord(Base):
+    __tablename__ = "investigation_runs"
+    __table_args__ = (
+        Index("ix_investigation_runs_incident_started", "incident_id", "started_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    incident_id: Mapped[UUID] = mapped_column(
+        ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    collector_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    clusterer_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    ranker_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    retrieval_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    failure_reason: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    incident: Mapped[IncidentRecord] = relationship(back_populates="investigations")
+    evidence: Mapped[list["EvidenceArtifactRecord"]] = relationship(
+        back_populates="investigation",
+        cascade="all, delete-orphan",
+        order_by="EvidenceArtifactRecord.collected_at",
+        passive_deletes=True,
+    )
+    error_clusters: Mapped[list["ErrorClusterRecord"]] = relationship(
+        back_populates="investigation",
+        cascade="all, delete-orphan",
+        order_by="ErrorClusterRecord.failure_count.desc()",
+        passive_deletes=True,
+    )
+    commit_candidates: Mapped[list["CommitCandidateRecord"]] = relationship(
+        back_populates="investigation",
+        cascade="all, delete-orphan",
+        order_by="CommitCandidateRecord.rank",
+        passive_deletes=True,
+    )
+    runbook_matches: Mapped[list["RunbookMatchRecord"]] = relationship(
+        back_populates="investigation",
+        cascade="all, delete-orphan",
+        order_by="RunbookMatchRecord.rank",
+        passive_deletes=True,
+    )
+
+
+class EvidenceArtifactRecord(Base):
+    __tablename__ = "evidence_artifacts"
+    __table_args__ = (
+        Index("ix_evidence_artifacts_investigation_kind", "investigation_id", "kind"),
+        Index("ix_evidence_artifacts_content_hash", "content_hash"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    investigation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("investigation_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_uri: Mapped[str] = mapped_column(String(500), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(json_document, nullable=False)
+    collected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    investigation: Mapped[InvestigationRunRecord] = relationship(back_populates="evidence")
+
+
+class ErrorClusterRecord(Base):
+    __tablename__ = "error_clusters"
+    __table_args__ = (
+        Index("ix_error_clusters_investigation_count", "investigation_id", "failure_count"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    investigation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("investigation_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    error_type: Mapped[str] = mapped_column(String(200), nullable=False)
+    endpoint: Mapped[str] = mapped_column(String(200), nullable=False)
+    affected_attributes: Mapped[dict[str, Any]] = mapped_column(json_document, nullable=False)
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sample_request_ids: Mapped[list[str]] = mapped_column(json_document, nullable=False)
+    evidence_ids: Mapped[list[str]] = mapped_column(json_document, nullable=False)
+
+    investigation: Mapped[InvestigationRunRecord] = relationship(back_populates="error_clusters")
+
+
+class CommitCandidateRecord(Base):
+    __tablename__ = "commit_candidates"
+    __table_args__ = (
+        Index("ix_commit_candidates_investigation_rank", "investigation_id", "rank"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    investigation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("investigation_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    commit_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_score: Mapped[float] = mapped_column(Float, nullable=False)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    author: Mapped[str] = mapped_column(String(200), nullable=False)
+    committed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    files_changed: Mapped[list[str]] = mapped_column(json_document, nullable=False)
+    diff_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    feature_scores: Mapped[dict[str, float]] = mapped_column(json_document, nullable=False)
+    explanation: Mapped[list[str]] = mapped_column(json_document, nullable=False)
+    evidence_ids: Mapped[list[str]] = mapped_column(json_document, nullable=False)
+
+    investigation: Mapped[InvestigationRunRecord] = relationship(
+        back_populates="commit_candidates"
+    )
+
+
+class RunbookMatchRecord(Base):
+    __tablename__ = "runbook_matches"
+    __table_args__ = (
+        Index("ix_runbook_matches_investigation_rank", "investigation_id", "rank"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    investigation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("investigation_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    runbook_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    service: Mapped[str] = mapped_column(String(100), nullable=False)
+    failure_mode: Mapped[str] = mapped_column(String(100), nullable=False)
+    total_score: Mapped[float] = mapped_column(Float, nullable=False)
+    score_breakdown: Mapped[dict[str, float]] = mapped_column(json_document, nullable=False)
+    matched_sections: Mapped[list[dict[str, str]]] = mapped_column(json_document, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_ids: Mapped[list[str]] = mapped_column(json_document, nullable=False)
+
+    investigation: Mapped[InvestigationRunRecord] = relationship(
+        back_populates="runbook_matches"
+    )

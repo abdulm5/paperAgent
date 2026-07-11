@@ -22,6 +22,12 @@ def override_get_db() -> Iterator[Session]:
         yield session
 
 
+@pytest.fixture
+def db_session() -> Iterator[Session]:
+    with TestingSessionLocal() as session:
+        yield session
+
+
 @pytest.fixture(autouse=True)
 def isolated_database() -> Iterator[None]:
     Base.metadata.drop_all(test_engine)

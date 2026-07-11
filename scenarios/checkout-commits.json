@@ -1,0 +1,59 @@
+{
+  "provider": "fixture-git-v1",
+  "commits": [
+    {
+      "sha": "8fa23c1",
+      "title": "Refactor digital wallet validation rules",
+      "author": "Maya Chen",
+      "minutes_before_deploy": 9,
+      "services": ["checkout-api"],
+      "owners": ["payments-platform"],
+      "change_types": ["validation_logic"],
+      "files_changed": [
+        "services/checkout/validation/payment_methods.py",
+        "services/checkout/tests/test_digital_wallet.py"
+      ],
+      "diff_summary": "Replace the digital_wallet validation rule mapping. Missing rules now raise ValidationRuleMissing during checkout payment validation."
+    },
+    {
+      "sha": "71bc022",
+      "title": "Rename checkout metric labels",
+      "author": "Nolan Brooks",
+      "minutes_before_deploy": 25,
+      "services": ["checkout-api"],
+      "owners": ["platform-observability"],
+      "change_types": ["observability"],
+      "files_changed": [
+        "services/checkout/telemetry/metrics.py"
+      ],
+      "diff_summary": "Rename checkout duration histogram labels and document the HTTP server error rate metric."
+    },
+    {
+      "sha": "4d290af",
+      "title": "Update authentication client dependency",
+      "author": "Rina Patel",
+      "minutes_before_deploy": 15,
+      "services": ["auth-api"],
+      "owners": ["identity-platform"],
+      "change_types": ["dependency_update"],
+      "files_changed": [
+        "services/auth/requirements.txt",
+        "services/auth/client.py"
+      ],
+      "diff_summary": "Upgrade the token verification client and update authentication retry defaults."
+    },
+    {
+      "sha": "c31a9d4",
+      "title": "Tune payment database connection pool",
+      "author": "Sam Ortega",
+      "minutes_before_deploy": 48,
+      "services": ["payment-api"],
+      "owners": ["payments-platform"],
+      "change_types": ["configuration"],
+      "files_changed": [
+        "services/payment/config/database.py"
+      ],
+      "diff_summary": "Increase payment database connection pool size and connection acquisition timeout."
+    }
+  ]
+}

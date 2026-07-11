@@ -4,7 +4,7 @@ PagerAgent is an evidence-grounded incident-response copilot. It helps an on-cal
 
 ## Project status
 
-**Milestone 2 — durable incident core.** PagerAgent now persists alerts and incidents in PostgreSQL, records lifecycle changes in an append-only timeline, and presents real evidence and human-operated transitions in the incident command dashboard. AI investigation intentionally remains the next milestone.
+**Phase 3 — evidence investigation pipeline.** PagerAgent now turns an alert into an immutable evidence ledger, clusters its failures, ranks suspect commits with explainable feature scores, and retrieves the most relevant runbook. Every derived result carries citations and the deterministic scenario benchmark runs in CI.
 
 ## The interview story
 
@@ -52,7 +52,7 @@ To replay the first incident automatically:
 ./scripts/run-demo.sh
 ```
 
-The script sends 20 healthy requests, activates `faulty-v2`, sends 40 additional requests, and waits for PagerAgent to receive the threshold alert. The expected result is 8 failed digital-wallet requests and a 13.3% error rate over the complete 60-request window. Open <http://localhost:5173> afterward to inspect the evidence and advance the incident lifecycle.
+The script sends 20 healthy requests, activates `faulty-v2`, sends 40 additional requests, and waits for the alert and its investigation. The expected result is one `ValidationRuleMissing` cluster with 8 failed digital-wallet requests, commit `8fa23c1` ranked first, and `checkout-api-rollback` retrieved first. Open <http://localhost:5173> afterward to inspect hashes, citations, scoring features, and the incident lifecycle.
 
 For local development outside Docker:
 
@@ -63,11 +63,11 @@ cd frontend && npm install && npm run dev
 
 ## Development milestones
 
-1. Foundation (complete): project structure, local stack, and architectural contracts.
-2. Simulator (complete): a checkout service, deterministic bad deploy, synthetic traffic, and alert ingestion.
-3. Incident core (complete): PostgreSQL persistence, lifecycle rules, and an operator dashboard.
-4. Evidence (next): telemetry parsing, commit ranking, and runbook retrieval.
-5. Copilot: grounded brief generation, approval workflow, and postmortem export.
-6. Evaluation: reproducible scenarios, benchmark metrics, and regression gates in CI.
+0. Foundation (complete): project structure, local stack, and architectural contracts.
+1. Simulator (complete): a checkout service, deterministic bad deploy, synthetic traffic, and alert ingestion.
+2. Incident core (complete): PostgreSQL persistence, lifecycle rules, and an operator dashboard.
+3. Evidence (complete): immutable collection, error clustering, explainable commit ranking, hybrid runbook retrieval, and deterministic quality gates.
+4. Copilot (next): grounded brief generation, approval workflow, and postmortem export.
+5. Evaluation expansion: add scenarios and model-quality regression gates.
 
 See [the architecture guide](docs/architecture.md), [milestone walkthroughs](docs/milestones/), and [decision records](docs/decisions/) for the rationale behind the design.

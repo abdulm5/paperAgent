@@ -44,13 +44,55 @@ echo "Waiting for the 5% error-rate alert..."
 for _ in {1..20}; do
   incidents="$(curl --fail --silent http://localhost:8000/api/v1/incidents)"
   if [[ "$incidents" != "[]" ]]; then
-    printf '%s' "$incidents" | python3 -m json.tool
-    echo "Demo complete: PagerAgent received the incident."
-    echo "Open http://localhost:5173 to inspect and advance the response."
-    exit 0
+    incident_id="$(printf '%s' "$incidents" | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["id"])')"
+    break
   fi
   sleep 0.5
 done
 
-echo "No incident arrived before the timeout." >&2
+if [[ -z "${incident_id:-}" ]]; then
+  echo "No incident arrived before the timeout." >&2
+  exit 1
+fi
+
+echo "Incident $incident_id created. Waiting for its evidence investigation..."
+for _ in {1..30}; do
+  investigation="$(
+    curl --silent --fail \
+      "http://localhost:8000/api/v1/incidents/$incident_id/investigations/latest" \
+      2>/dev/null || true
+  )"
+  if [[ -n "$investigation" ]]; then
+    investigation_status="$(
+      printf '%s' "$investigation" \
+        | python3 -c 'import json, sys; print(json.load(sys.stdin)["status"])'
+    )"
+    if [[ "$investigation_status" == "completed" ]]; then
+      printf '%s' "$investigation" | python3 -c '
+import json
+import sys
+
+result = json.load(sys.stdin)
+cluster = result["error_clusters"][0]
+commit = result["commit_candidates"][0]
+runbook = result["runbook_matches"][0]
+print("\nPagerAgent investigation complete")
+print("  Cluster: {} ({} failures)".format(cluster["error_type"], cluster["failure_count"]))
+print("  Suspect: #{} {} (score {:.4f})".format(commit["rank"], commit["commit_sha"], commit["total_score"]))
+print("  Runbook: #{} {} (score {:.4f})".format(runbook["rank"], runbook["runbook_id"], runbook["total_score"]))
+print("  Evidence: {} immutable artifacts".format(len(result["evidence"])))
+'
+      echo "Open http://localhost:5173 to inspect citations and advance the response."
+      exit 0
+    fi
+    if [[ "$investigation_status" == "failed" ]]; then
+      printf '%s' "$investigation" | python3 -m json.tool >&2
+      echo "PagerAgent investigation failed." >&2
+      exit 1
+    fi
+  fi
+  sleep 0.5
+done
+
+echo "The incident arrived, but its investigation did not finish before the timeout." >&2
 exit 1

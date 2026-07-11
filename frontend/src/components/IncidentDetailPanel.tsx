@@ -1,7 +1,8 @@
 import { useState } from "react";
 
-import type { IncidentDetail, IncidentStatus } from "../lib/api";
+import type { IncidentDetail, IncidentStatus, InvestigationDetail } from "../lib/api";
 import { formatDuration, formatTimestamp, titleCase } from "../lib/format";
+import { InvestigationPanel } from "./InvestigationPanel";
 
 const nextStatus: Partial<Record<IncidentStatus, IncidentStatus>> = {
   detected: "investigating",
@@ -21,6 +22,11 @@ interface IncidentDetailPanelProps {
   transitionError: string | null;
   transitioning: boolean;
   onTransition: (toStatus: IncidentStatus, note: string) => Promise<boolean>;
+  investigation: InvestigationDetail | null;
+  investigationLoading: boolean;
+  investigationRunning: boolean;
+  investigationError: string | null;
+  onRunInvestigation: () => Promise<void>;
 }
 
 export function IncidentDetailPanel({
@@ -29,6 +35,11 @@ export function IncidentDetailPanel({
   transitionError,
   transitioning,
   onTransition,
+  investigation,
+  investigationLoading,
+  investigationRunning,
+  investigationError,
+  onRunInvestigation,
 }: IncidentDetailPanelProps) {
   const [note, setNote] = useState("");
 
@@ -120,6 +131,14 @@ export function IncidentDetailPanel({
           </div>
         </div>
       </section>
+
+      <InvestigationPanel
+        error={investigationError}
+        investigation={investigation}
+        loading={investigationLoading}
+        onRun={onRunInvestigation}
+        running={investigationRunning}
+      />
 
       <section className="timeline-section" aria-labelledby="timeline-title">
         <div className="section-title-row">

@@ -36,6 +36,9 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://pageragent:pageragent@postgres:5432/pageragent
       REDIS_URL: redis://redis:6379/0
+      RUNBOOK_DIRECTORY: /runbooks
+      COMMIT_FIXTURE_PATH: /scenarios/checkout-commits.json
+      AUTO_INVESTIGATE_INCIDENTS: "true"
     ports:
       - "8000:8000"
     healthcheck:
@@ -45,6 +48,8 @@ services:
       retries: 10
     volumes:
       - ./backend:/app
+      - ./runbooks:/runbooks:ro
+      - ./scenarios:/scenarios:ro
     depends_on:
       postgres:
         condition: service_healthy

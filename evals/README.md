@@ -11,7 +11,30 @@ The `checkout-validation-bug` benchmark now checks:
 
 The evaluator lives in `backend/app/evaluation/investigations.py`. Its quality gate is
 executed by the backend test suite, so ranking or retrieval regressions fail CI instead
-of being discovered during the demo. The evaluator is intentionally deterministic; LLM
-quality evaluation starts when grounded synthesis is introduced in the next milestone.
-The investigation layer has no production-action capability; later mitigation execution
-will require the human-approval domain event defined in ADR 0002.
+of being discovered during the demo. The investigation evaluator remains deterministic
+so ranking regressions are isolated from language-model variability.
+
+Phase 4 adds `backend/app/evaluation/proposals.py`. Its regression gate checks:
+
+- all four required claim types are present;
+- every citation resolves to evidence from the selected investigation;
+- the action envelope matches the expected service and known-good release;
+- no execution exists without an append-only approval decision;
+- recovery telemetry is verified after execution.
+
+The OpenAI adapter is tested with a mocked Responses API transport, while the same
+proposal contract is exercised end to end with the deterministic synthesizer. This
+keeps CI reproducible without weakening the production integration boundary.
+
+Phase 5 adds `backend/app/evaluation/postmortems.py`. Its gate checks:
+
+- all required narrative sections are non-empty;
+- every narrative, learning, prevention, and timeline item has an allowed citation;
+- the report timeline covers the exact pre-generation incident-event set;
+- root cause and customer impact match scenario ground truth;
+- at least three prevention items turn findings into owned follow-through;
+- the latest immutable revision matches the visible document version and finalization state.
+
+Generation is exercised through both the deterministic provider and a mocked OpenAI
+Structured Outputs transport. API tests cover generation, revision conflicts, finalization
+locks, invalid-citation rejection, and Markdown export.

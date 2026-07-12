@@ -1,7 +1,8 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +20,15 @@ class Settings(BaseSettings):
     commit_fixture_path: Path = Path("../scenarios/checkout-commits.json")
     auto_investigate_incidents: bool = False
     investigation_http_timeout_seconds: float = 5.0
+    auto_generate_proposals: bool = True
+    synthesis_provider: Literal["auto", "openai", "deterministic"] = "auto"
+    openai_api_key: SecretStr | None = None
+    openai_model: str = "gpt-5.6-luna"
+    openai_base_url: str = "https://api.openai.com/v1"
+    synthesis_http_timeout_seconds: float = 30.0
+    checkout_control_url: str = "http://localhost:8100"
+    recovery_canary_requests: int = 15
+    auto_generate_postmortems: bool = False
 
 
 @lru_cache

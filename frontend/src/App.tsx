@@ -3,15 +3,26 @@ import { useCallback, useEffect, useState } from "react";
 import { IncidentDetailPanel } from "./components/IncidentDetailPanel";
 import { IncidentQueue } from "./components/IncidentQueue";
 import {
+  decideProposal,
+  finalizePostmortem,
+  generateProposal,
+  generatePostmortem,
   getIncident,
   getIncidents,
   getLatestInvestigation,
+  getLatestProposal,
+  getPostmortem,
   runInvestigation,
   transitionIncident,
+  updatePostmortem,
   type IncidentDetail,
   type IncidentStatus,
   type IncidentSummary,
   type InvestigationDetail,
+  type MitigationProposal,
+  type PostmortemDetail,
+  type PostmortemEditPayload,
+  type ProposalDecision,
 } from "./lib/api";
 
 export default function App() {
@@ -27,6 +38,14 @@ export default function App() {
   const [investigationLoading, setInvestigationLoading] = useState(false);
   const [investigationRunning, setInvestigationRunning] = useState(false);
   const [investigationError, setInvestigationError] = useState<string | null>(null);
+  const [proposal, setProposal] = useState<MitigationProposal | null>(null);
+  const [proposalLoading, setProposalLoading] = useState(false);
+  const [proposalActing, setProposalActing] = useState(false);
+  const [proposalError, setProposalError] = useState<string | null>(null);
+  const [postmortem, setPostmortem] = useState<PostmortemDetail | null>(null);
+  const [postmortemLoading, setPostmortemLoading] = useState(false);
+  const [postmortemActing, setPostmortemActing] = useState(false);
+  const [postmortemError, setPostmortemError] = useState<string | null>(null);
 
   const loadQueue = useCallback(async () => {
     try {
@@ -70,6 +89,30 @@ export default function App() {
     }
   }, []);
 
+  const loadProposal = useCallback(async (incidentId: string) => {
+    setProposalLoading(true);
+    try {
+      setProposal(await getLatestProposal(incidentId));
+      setProposalError(null);
+    } catch (error) {
+      setProposalError(error instanceof Error ? error.message : "Copilot brief is unavailable.");
+    } finally {
+      setProposalLoading(false);
+    }
+  }, []);
+
+  const loadPostmortem = useCallback(async (incidentId: string) => {
+    setPostmortemLoading(true);
+    try {
+      setPostmortem(await getPostmortem(incidentId));
+      setPostmortemError(null);
+    } catch (error) {
+      setPostmortemError(error instanceof Error ? error.message : "Postmortem is unavailable.");
+    } finally {
+      setPostmortemLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void loadQueue();
     const refreshTimer = window.setInterval(() => void loadQueue(), 5_000);
@@ -79,22 +122,32 @@ export default function App() {
   useEffect(() => {
     if (selectedId) {
       setInvestigation(null);
+      setProposal(null);
+      setPostmortem(null);
       void loadDetail(selectedId);
       void loadInvestigation(selectedId);
+      void loadProposal(selectedId);
+      void loadPostmortem(selectedId);
     } else {
       setDetail(null);
       setInvestigation(null);
+      setProposal(null);
+      setPostmortem(null);
     }
-  }, [loadDetail, loadInvestigation, selectedId]);
+  }, [loadDetail, loadInvestigation, loadPostmortem, loadProposal, selectedId]);
 
   useEffect(() => {
     if (!selectedId) return;
     const investigationTimer = window.setInterval(
-      () => void loadInvestigation(selectedId),
+      () => {
+        void loadInvestigation(selectedId);
+        void loadProposal(selectedId);
+        void loadPostmortem(selectedId);
+      },
       5_000,
     );
     return () => window.clearInterval(investigationTimer);
-  }, [loadInvestigation, selectedId]);
+  }, [loadInvestigation, loadPostmortem, loadProposal, selectedId]);
 
   async function handleTransition(toStatus: IncidentStatus, note: string) {
     if (!detail) return false;
@@ -104,6 +157,7 @@ export default function App() {
       const updated = await transitionIncident(detail.id, toStatus, detail.version, note);
       setDetail(updated);
       await loadQueue();
+      if (toStatus === "resolved") await loadPostmortem(detail.id);
       return true;
     } catch (error) {
       setTransitionError(error instanceof Error ? error.message : "Status change failed.");
@@ -125,6 +179,79 @@ export default function App() {
       setInvestigationError(error instanceof Error ? error.message : "Investigation failed.");
     } finally {
       setInvestigationRunning(false);
+    }
+  }
+
+  async function handleGenerateProposal() {
+    if (!selectedId) return;
+    setProposalActing(true);
+    setProposalError(null);
+    try {
+      setProposal(await generateProposal(selectedId));
+      await loadDetail(selectedId);
+    } catch (error) {
+      setProposalError(error instanceof Error ? error.message : "Brief generation failed.");
+    } finally {
+      setProposalActing(false);
+    }
+  }
+
+  async function handleProposalDecision(decision: ProposalDecision, note: string) {
+    if (!proposal || !selectedId) return;
+    setProposalActing(true);
+    setProposalError(null);
+    try {
+      setProposal(await decideProposal(proposal.id, decision, note));
+      await Promise.all([loadDetail(selectedId), loadQueue()]);
+    } catch (error) {
+      setProposalError(error instanceof Error ? error.message : "Decision could not be recorded.");
+      await loadProposal(selectedId);
+    } finally {
+      setProposalActing(false);
+    }
+  }
+
+  async function handleGeneratePostmortem() {
+    if (!selectedId) return;
+    setPostmortemActing(true);
+    setPostmortemError(null);
+    try {
+      setPostmortem(await generatePostmortem(selectedId));
+      await loadDetail(selectedId);
+    } catch (error) {
+      setPostmortemError(error instanceof Error ? error.message : "Generation failed.");
+    } finally {
+      setPostmortemActing(false);
+    }
+  }
+
+  async function handleSavePostmortem(edit: PostmortemEditPayload) {
+    if (!postmortem || !selectedId) return;
+    setPostmortemActing(true);
+    setPostmortemError(null);
+    try {
+      setPostmortem(await updatePostmortem(postmortem, edit));
+      await loadDetail(selectedId);
+    } catch (error) {
+      setPostmortemError(error instanceof Error ? error.message : "Draft could not be saved.");
+      await loadPostmortem(selectedId);
+    } finally {
+      setPostmortemActing(false);
+    }
+  }
+
+  async function handleFinalizePostmortem(note: string) {
+    if (!postmortem || !selectedId) return;
+    setPostmortemActing(true);
+    setPostmortemError(null);
+    try {
+      setPostmortem(await finalizePostmortem(postmortem, note));
+      await loadDetail(selectedId);
+    } catch (error) {
+      setPostmortemError(error instanceof Error ? error.message : "Finalization failed.");
+      await loadPostmortem(selectedId);
+    } finally {
+      setPostmortemActing(false);
     }
   }
 
@@ -173,6 +300,19 @@ export default function App() {
           investigationError={investigationError}
           investigationLoading={investigationLoading}
           investigationRunning={investigationRunning}
+          proposal={proposal}
+          proposalActing={proposalActing}
+          proposalError={proposalError}
+          proposalLoading={proposalLoading}
+          postmortem={postmortem}
+          postmortemActing={postmortemActing}
+          postmortemError={postmortemError}
+          postmortemLoading={postmortemLoading}
+          onGeneratePostmortem={handleGeneratePostmortem}
+          onSavePostmortem={handleSavePostmortem}
+          onFinalizePostmortem={handleFinalizePostmortem}
+          onGenerateProposal={handleGenerateProposal}
+          onProposalDecision={handleProposalDecision}
           onTransition={handleTransition}
           onRunInvestigation={handleRunInvestigation}
           transitionError={transitionError}

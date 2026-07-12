@@ -1,8 +1,18 @@
 import { useState } from "react";
 
-import type { IncidentDetail, IncidentStatus, InvestigationDetail } from "../lib/api";
+import type {
+  IncidentDetail,
+  IncidentStatus,
+  InvestigationDetail,
+  MitigationProposal,
+  PostmortemDetail,
+  PostmortemEditPayload,
+  ProposalDecision,
+} from "../lib/api";
 import { formatDuration, formatTimestamp, titleCase } from "../lib/format";
 import { InvestigationPanel } from "./InvestigationPanel";
+import { ProposalPanel } from "./ProposalPanel";
+import { PostmortemPanel } from "./PostmortemPanel";
 
 const nextStatus: Partial<Record<IncidentStatus, IncidentStatus>> = {
   detected: "investigating",
@@ -27,6 +37,19 @@ interface IncidentDetailPanelProps {
   investigationRunning: boolean;
   investigationError: string | null;
   onRunInvestigation: () => Promise<void>;
+  proposal: MitigationProposal | null;
+  proposalLoading: boolean;
+  proposalActing: boolean;
+  proposalError: string | null;
+  onGenerateProposal: () => Promise<void>;
+  onProposalDecision: (decision: ProposalDecision, note: string) => Promise<void>;
+  postmortem: PostmortemDetail | null;
+  postmortemLoading: boolean;
+  postmortemActing: boolean;
+  postmortemError: string | null;
+  onGeneratePostmortem: () => Promise<void>;
+  onSavePostmortem: (edit: PostmortemEditPayload) => Promise<void>;
+  onFinalizePostmortem: (note: string) => Promise<void>;
 }
 
 export function IncidentDetailPanel({
@@ -40,6 +63,19 @@ export function IncidentDetailPanel({
   investigationRunning,
   investigationError,
   onRunInvestigation,
+  proposal,
+  proposalLoading,
+  proposalActing,
+  proposalError,
+  onGenerateProposal,
+  onProposalDecision,
+  postmortem,
+  postmortemLoading,
+  postmortemActing,
+  postmortemError,
+  onGeneratePostmortem,
+  onSavePostmortem,
+  onFinalizePostmortem,
 }: IncidentDetailPanelProps) {
   const [note, setNote] = useState("");
 
@@ -140,6 +176,16 @@ export function IncidentDetailPanel({
         running={investigationRunning}
       />
 
+      <ProposalPanel
+        acting={proposalActing}
+        error={proposalError}
+        incidentStatus={incident.status}
+        loading={proposalLoading}
+        onDecision={onProposalDecision}
+        onGenerate={onGenerateProposal}
+        proposal={proposal}
+      />
+
       <section className="timeline-section" aria-labelledby="timeline-title">
         <div className="section-title-row">
           <div>
@@ -193,6 +239,17 @@ export function IncidentDetailPanel({
       ) : (
         <div className="resolved-banner">Incident closed · timeline preserved for review</div>
       )}
+
+      <PostmortemPanel
+        acting={postmortemActing}
+        error={postmortemError}
+        incidentStatus={incident.status}
+        loading={postmortemLoading}
+        onFinalize={onFinalizePostmortem}
+        onGenerate={onGeneratePostmortem}
+        onSave={onSavePostmortem}
+        postmortem={postmortem}
+      />
     </section>
   );
 }

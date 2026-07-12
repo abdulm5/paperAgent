@@ -13,6 +13,11 @@ from app.db.models import (
     IncidentEventRecord,
     IncidentRecord,
     InvestigationRunRecord,
+    MitigationExecutionRecord,
+    MitigationProposalRecord,
+    PostmortemRecord,
+    PostmortemRevisionRecord,
+    ProposalDecisionRecord,
     RunbookMatchRecord,
 )
 from app.domain.incidents import (
@@ -122,6 +127,7 @@ class IncidentService:
                 selectinload(IncidentRecord.alerts),
                 selectinload(IncidentRecord.events),
             )
+            .execution_options(populate_existing=True)
         )
         if record is None:
             raise IncidentNotFoundError
@@ -168,6 +174,11 @@ class IncidentService:
 
     def clear(self) -> int:
         count = len(self.session.scalars(select(IncidentRecord.id)).all())
+        self.session.execute(delete(PostmortemRevisionRecord))
+        self.session.execute(delete(PostmortemRecord))
+        self.session.execute(delete(MitigationExecutionRecord))
+        self.session.execute(delete(ProposalDecisionRecord))
+        self.session.execute(delete(MitigationProposalRecord))
         self.session.execute(delete(RunbookMatchRecord))
         self.session.execute(delete(CommitCandidateRecord))
         self.session.execute(delete(ErrorClusterRecord))

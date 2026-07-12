@@ -39,6 +39,9 @@ services:
       RUNBOOK_DIRECTORY: /runbooks
       COMMIT_FIXTURE_PATH: /scenarios/checkout-commits.json
       AUTO_INVESTIGATE_INCIDENTS: "true"
+      AUTO_GENERATE_PROPOSALS: "true"
+      AUTO_GENERATE_POSTMORTEMS: "true"
+      CHECKOUT_CONTROL_URL: http://checkout-api:8100
     ports:
       - "8000:8000"
     healthcheck:
@@ -54,6 +57,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      checkout-api:
         condition: service_healthy
 
   checkout-api:

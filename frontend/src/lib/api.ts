@@ -127,6 +127,160 @@ export interface InvestigationDetail {
   runbook_matches: RunbookMatch[];
 }
 
+export type ProposalStatus =
+  | "pending_approval"
+  | "rejected"
+  | "approved"
+  | "executing"
+  | "verification_passed"
+  | "execution_failed";
+
+export type ProposalDecision = "approve" | "reject";
+
+export interface GroundedClaim {
+  kind: "root_cause" | "impact" | "recommendation" | "risk";
+  text: string;
+  evidence_ids: string[];
+}
+
+export interface ProposalDecisionDetail {
+  id: string;
+  decision: ProposalDecision;
+  actor: string;
+  note: string | null;
+  created_at: string;
+}
+
+export interface MitigationExecution {
+  id: string;
+  status: string;
+  executor_version: string;
+  idempotency_key: string;
+  request_payload: Record<string, unknown>;
+  response_payload: Record<string, unknown>;
+  before_telemetry: Record<string, unknown>;
+  after_telemetry: Record<string, unknown>;
+  recovery_verified: boolean;
+  failure_reason: string | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface MitigationProposal {
+  id: string;
+  incident_id: string;
+  investigation_id: string;
+  status: ProposalStatus;
+  synthesizer_version: string;
+  model_name: string;
+  prompt_version: string;
+  input_hash: string;
+  root_cause_summary: string;
+  confidence: number;
+  impact_summary: string;
+  recommended_action: string;
+  risk_summary: string;
+  verification_steps: string[];
+  slack_update: string;
+  claims: GroundedClaim[];
+  action: {
+    action_type: "rollback_service";
+    target_service: "checkout-api";
+    target_release: "stable-v1";
+    expected_faulty_commit: string;
+  };
+  failure_reason: string | null;
+  created_at: string;
+  decided_at: string | null;
+  decisions: ProposalDecisionDetail[];
+  execution: MitigationExecution | null;
+}
+
+export type PostmortemStatus = "draft" | "final";
+export type PreventionPriority = "P0" | "P1" | "P2" | "P3";
+
+export interface GroundedPostmortemSection {
+  text: string;
+  evidence_ids: string[];
+}
+
+export interface PostmortemObservation extends GroundedPostmortemSection {}
+
+export interface PreventionItem {
+  title: string;
+  description: string;
+  owner: string;
+  priority: PreventionPriority;
+  status: string;
+  evidence_ids: string[];
+}
+
+export interface PostmortemTimelineEntry {
+  occurred_at: string;
+  event_type: string;
+  actor: string;
+  description: string;
+  evidence_ids: string[];
+}
+
+export interface PostmortemContent {
+  title: string;
+  summary: GroundedPostmortemSection;
+  root_cause: GroundedPostmortemSection;
+  customer_impact: GroundedPostmortemSection;
+  detection: GroundedPostmortemSection;
+  resolution: GroundedPostmortemSection;
+  what_went_well: PostmortemObservation[];
+  what_went_poorly: PostmortemObservation[];
+  prevention_items: PreventionItem[];
+  timeline: PostmortemTimelineEntry[];
+}
+
+export interface PostmortemRevision {
+  id: string;
+  version: number;
+  source: string;
+  editor: string;
+  change_note: string;
+  created_at: string;
+}
+
+export interface PostmortemDetail {
+  id: string;
+  incident_id: string;
+  status: PostmortemStatus;
+  version: number;
+  generator_version: string;
+  model_name: string;
+  prompt_version: string;
+  input_hash: string;
+  content: PostmortemContent;
+  created_at: string;
+  updated_at: string;
+  finalized_at: string | null;
+  finalized_by: string | null;
+  revisions: PostmortemRevision[];
+}
+
+export interface PostmortemEditPayload {
+  change_note: string;
+  title: string;
+  summary: string;
+  root_cause: string;
+  customer_impact: string;
+  detection: string;
+  resolution: string;
+  what_went_well: string[];
+  what_went_poorly: string[];
+  prevention_items: Array<{
+    title: string;
+    description: string;
+    owner: string;
+    priority: PreventionPriority;
+    status: string;
+  }>;
+}
+
 export class ApiError extends Error {
   status: number;
 
@@ -190,4 +344,87 @@ export function runInvestigation(incidentId: string): Promise<InvestigationDetai
   return request<InvestigationDetail>(`/api/v1/incidents/${incidentId}/investigations`, {
     method: "POST",
   });
+}
+
+export async function getLatestProposal(
+  incidentId: string,
+): Promise<MitigationProposal | null> {
+  try {
+    return await request<MitigationProposal>(
+      `/api/v1/incidents/${incidentId}/proposals/latest`,
+    );
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  }
+}
+
+export function generateProposal(incidentId: string): Promise<MitigationProposal> {
+  return request<MitigationProposal>(`/api/v1/incidents/${incidentId}/proposals`, {
+    method: "POST",
+  });
+}
+
+export function decideProposal(
+  proposalId: string,
+  decision: ProposalDecision,
+  note: string,
+): Promise<MitigationProposal> {
+  return request<MitigationProposal>(`/api/v1/proposals/${proposalId}/decisions`, {
+    method: "POST",
+    body: JSON.stringify({
+      decision,
+      actor: "demo-operator",
+      note: note || null,
+    }),
+  });
+}
+
+export async function getPostmortem(
+  incidentId: string,
+): Promise<PostmortemDetail | null> {
+  try {
+    return await request<PostmortemDetail>(`/api/v1/incidents/${incidentId}/postmortem`);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  }
+}
+
+export function generatePostmortem(incidentId: string): Promise<PostmortemDetail> {
+  return request<PostmortemDetail>(`/api/v1/incidents/${incidentId}/postmortem`, {
+    method: "POST",
+  });
+}
+
+export function updatePostmortem(
+  postmortem: PostmortemDetail,
+  edit: PostmortemEditPayload,
+): Promise<PostmortemDetail> {
+  return request<PostmortemDetail>(`/api/v1/postmortems/${postmortem.id}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      ...edit,
+      expected_version: postmortem.version,
+      actor: "demo-incident-commander",
+    }),
+  });
+}
+
+export function finalizePostmortem(
+  postmortem: PostmortemDetail,
+  note: string,
+): Promise<PostmortemDetail> {
+  return request<PostmortemDetail>(`/api/v1/postmortems/${postmortem.id}/finalize`, {
+    method: "POST",
+    body: JSON.stringify({
+      expected_version: postmortem.version,
+      actor: "demo-incident-commander",
+      note: note || null,
+    }),
+  });
+}
+
+export function postmortemExportUrl(postmortemId: string): string {
+  return `/api/v1/postmortems/${postmortemId}/export`;
 }

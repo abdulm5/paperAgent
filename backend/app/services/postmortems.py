@@ -418,6 +418,9 @@ class PostmortemService:
                     InvestigationRunRecord.error_clusters
                 ),
                 selectinload(IncidentRecord.investigations).selectinload(
+                    InvestigationRunRecord.cause_candidates
+                ),
+                selectinload(IncidentRecord.investigations).selectinload(
                     InvestigationRunRecord.commit_candidates
                 ),
                 selectinload(IncidentRecord.investigations).selectinload(
@@ -474,6 +477,10 @@ class PostmortemService:
                     item.model_dump(mode="json")
                     for item in investigation_detail.error_clusters
                 ],
+                "cause_candidates": [
+                    item.model_dump(mode="json")
+                    for item in investigation_detail.cause_candidates
+                ],
                 "commit_candidates": [
                     item.model_dump(mode="json")
                     for item in investigation_detail.commit_candidates
@@ -517,6 +524,7 @@ class PostmortemService:
             *incident.events,
             *investigation.evidence,
             *investigation.error_clusters,
+            *investigation.cause_candidates,
             *investigation.commit_candidates,
             *investigation.runbook_matches,
             proposal,

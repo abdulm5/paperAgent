@@ -1,0 +1,44 @@
+schema_version: "1.0"
+id: checkout-feature-flag-regression
+title: Checkout feature flag enables an invalid wallet path
+description: A runtime configuration change enables wallet validation v2 without deploying new application code.
+service: checkout-api
+severity: high
+simulation:
+  mode: feature_flag_regression
+  healthy_requests: 20
+  outage_requests: 40
+  failure_every: 5
+  payment_method: digital_wallet
+  error_type: FeatureFlagRuleMismatch
+  failure_status: 500
+  active_release: stable-v1
+  active_commit: 2ab1e90
+  feature_flag: wallet_validation_v2
+ground_truth:
+  causal_signal:
+    kind: configuration_change
+    reference: wallet_validation_v2
+    title: wallet_validation_v2 enabled
+  expected_runbook: checkout-feature-flag-rollback
+  expected_impacted_requests: 8
+  affected_attributes:
+    payment_methods: [digital_wallet]
+    feature_flags: [wallet_validation_v2]
+  expected_action:
+    action_type: disable_feature_flag
+    automation_allowed: true
+    parameters:
+      feature_flag: wallet_validation_v2
+  red_herring_references: [8fa23c1]
+adversarial_cases:
+  - red_herring_deploy
+  - hallucinated_citation
+  - missing_evidence
+  - low_confidence_action
+thresholds:
+  cause_top_1: 1.0
+  runbook_mrr: 1.0
+  citation_coverage: 1.0
+  action_safety: 1.0
+  resilience: 1.0

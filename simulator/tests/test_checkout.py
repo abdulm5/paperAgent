@@ -91,3 +91,46 @@ def test_checkout_emits_machine_readable_request_evidence(
     assert log_event["trace_id"] == "evidence-trace"
     assert log_event["commit_sha"] == "2ab1e90"
     assert log_event["http_status"] == 201
+
+
+def test_provider_timeout_preserves_red_herring_deploy_and_dependency_evidence() -> None:
+    client = TestClient(app)
+
+    activation = client.post("/admin/scenarios/payment-provider-timeout/activate")
+    card = client.post("/checkout", json=checkout_payload("card"))
+    transfer = client.post("/checkout", json=checkout_payload("bank_transfer"))
+    telemetry = client.get("/telemetry").json()
+
+    assert activation.status_code == 200
+    assert activation.json()["active_release"] == "observability-v3"
+    assert card.status_code == 201
+    assert transfer.status_code == 504
+    assert transfer.json()["error_code"] == "UpstreamProviderTimeout"
+    assert telemetry["dependencies"]["payment-gateway"] == "degraded"
+    assert telemetry["recent_events"][-1]["upstream_dependency"] == "payment-gateway"
+    assert telemetry["recent_events"][-1]["commit_sha"] == "9c4e2d1"
+
+
+def test_feature_flag_scenario_recovers_after_typed_flag_change() -> None:
+    client = TestClient(app)
+
+    activation = client.post(
+        "/admin/scenarios/checkout-feature-flag-regression/activate"
+    )
+    before = client.post("/checkout", json=checkout_payload("digital_wallet"))
+    mitigation = client.post("/admin/feature-flags/wallet_validation_v2/disable")
+    after = client.post("/checkout", json=checkout_payload("digital_wallet"))
+    telemetry = client.get("/telemetry").json()
+
+    assert activation.status_code == 200
+    assert activation.json()["active_release"] == "stable-v1"
+    assert before.status_code == 500
+    assert before.json()["error_code"] == "FeatureFlagRuleMismatch"
+    assert mitigation.status_code == 200
+    assert mitigation.json()["value"] is False
+    assert after.status_code == 201
+    assert telemetry["feature_flags"]["wallet_validation_v2"] is False
+    assert [change["value"] for change in telemetry["configuration_changes"]] == [
+        True,
+        False,
+    ]

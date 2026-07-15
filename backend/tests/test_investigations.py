@@ -11,6 +11,7 @@ from app.evaluation.investigations import (
     InvestigationGroundTruth,
     evaluate_investigation,
 )
+from app.investigation.causes import CauseRanker
 from app.investigation.clustering import ErrorClusterer
 from app.investigation.collectors import StaticTelemetryCollector
 from app.investigation.commits import CommitRanker, FixtureGitProvider
@@ -105,6 +106,7 @@ def build_service(session: Session) -> InvestigationService:
         git_provider=FixtureGitProvider(REPOSITORY_ROOT / "scenarios/checkout-commits.json"),
         clusterer=ErrorClusterer(),
         commit_ranker=CommitRanker(),
+        cause_ranker=CauseRanker(),
         runbook_retriever=RunbookRetriever(REPOSITORY_ROOT / "runbooks"),
     )
 

@@ -4,11 +4,15 @@ from threading import RLock
 
 from app.models import (
     CheckoutRequest,
+    ConfigurationChange,
     DeploymentEvent,
+    FeatureFlagResponse,
     PaymentMethod,
     ReleaseMetadata,
     ReleaseName,
     ResetResponse,
+    ScenarioName,
+    ScenarioStateResponse,
     TelemetryEvent,
     TelemetrySnapshot,
 )
@@ -16,6 +20,7 @@ from app.models import (
 RELEASE_COMMITS = {
     ReleaseName.STABLE: "2ab1e90",
     ReleaseName.FAULTY: "8fa23c1",
+    ReleaseName.OBSERVABILITY: "9c4e2d1",
 }
 
 
@@ -28,6 +33,10 @@ class CheckoutState:
         self._deployed_at = datetime.now(UTC)
         self._events: list[TelemetryEvent] = []
         self._deployments: list[DeploymentEvent] = []
+        self._scenario_id = "healthy"
+        self._feature_flags: dict[str, bool] = {"wallet_validation_v2": False}
+        self._dependencies: dict[str, str] = {"payment-gateway": "healthy"}
+        self._configuration_changes: list[ConfigurationChange] = []
         self.reset()
 
     def reset(self) -> ResetResponse:
@@ -36,6 +45,10 @@ class CheckoutState:
             self._active_release = ReleaseName.STABLE
             self._deployed_at = now
             self._events = []
+            self._scenario_id = "healthy"
+            self._feature_flags = {"wallet_validation_v2": False}
+            self._dependencies = {"payment-gateway": "healthy"}
+            self._configuration_changes = []
             self._deployments = [
                 DeploymentEvent(
                     previous_release=None,
@@ -60,6 +73,51 @@ class CheckoutState:
             self._deployments.append(event)
             return event
 
+    def activate_scenario(self, scenario: ScenarioName) -> ScenarioStateResponse:
+        with self._lock:
+            self._scenario_id = scenario.value
+            if scenario is ScenarioName.VALIDATION_BUG:
+                self.deploy(ReleaseName.FAULTY)
+            elif scenario is ScenarioName.PROVIDER_TIMEOUT:
+                self.deploy(ReleaseName.OBSERVABILITY)
+                self._dependencies["payment-gateway"] = "degraded"
+            else:
+                now = datetime.now(UTC)
+                self._configuration_changes.append(
+                    ConfigurationChange(
+                        name="wallet_validation_v2",
+                        previous_value=self._feature_flags["wallet_validation_v2"],
+                        value=True,
+                        changed_at=now,
+                        actor="scenario-controller",
+                    )
+                )
+                self._feature_flags["wallet_validation_v2"] = True
+            return ScenarioStateResponse(
+                scenario_id=scenario,
+                active_release=self._active_release,
+                feature_flags=dict(self._feature_flags),
+                dependencies=dict(self._dependencies),
+            )
+
+    def disable_feature_flag(self, name: str) -> FeatureFlagResponse:
+        with self._lock:
+            if name not in self._feature_flags:
+                raise KeyError(name)
+            now = datetime.now(UTC)
+            previous = self._feature_flags[name]
+            self._feature_flags[name] = False
+            self._configuration_changes.append(
+                ConfigurationChange(
+                    name=name,
+                    previous_value=previous,
+                    value=False,
+                    changed_at=now,
+                    actor="pageragent-executor",
+                )
+            )
+            return FeatureFlagResponse(name=name, value=False, changed_at=now)
+
     def record_checkout(
         self,
         checkout: CheckoutRequest,
@@ -68,16 +126,37 @@ class CheckoutState:
     ) -> TelemetryEvent:
         with self._lock:
             sequence = len(self._events) + 1
-            failed = (
+            validation_failed = (
                 self._active_release is ReleaseName.FAULTY
                 and checkout.payment_method is PaymentMethod.DIGITAL_WALLET
             )
+            provider_failed = (
+                self._scenario_id == ScenarioName.PROVIDER_TIMEOUT.value
+                and self._dependencies["payment-gateway"] == "degraded"
+                and checkout.payment_method is PaymentMethod.BANK_TRANSFER
+            )
+            flag_failed = (
+                self._scenario_id == ScenarioName.FEATURE_FLAG_REGRESSION.value
+                and self._feature_flags["wallet_validation_v2"]
+                and checkout.payment_method is PaymentMethod.DIGITAL_WALLET
+            )
+            failed = validation_failed or provider_failed or flag_failed
             baseline_latency = {
                 PaymentMethod.CARD: 38,
                 PaymentMethod.BANK_TRANSFER: 52,
                 PaymentMethod.DIGITAL_WALLET: 45,
             }[checkout.payment_method]
-            latency_ms = float(baseline_latency + sequence % 7 + (70 if failed else 0))
+            latency_penalty = 320 if provider_failed else 70 if failed else 0
+            latency_ms = float(baseline_latency + sequence % 7 + latency_penalty)
+            error_type = (
+                "ValidationRuleMissing"
+                if validation_failed
+                else "UpstreamProviderTimeout"
+                if provider_failed
+                else "FeatureFlagRuleMismatch"
+                if flag_failed
+                else None
+            )
             event = TelemetryEvent(
                 timestamp=datetime.now(UTC),
                 request_id=request_id,
@@ -86,10 +165,13 @@ class CheckoutState:
                 payment_method=checkout.payment_method,
                 release=self._active_release,
                 commit_sha=RELEASE_COMMITS[self._active_release],
-                http_status=500 if failed else 201,
+                http_status=504 if provider_failed else 500 if failed else 201,
                 outcome="failure" if failed else "success",
                 latency_ms=latency_ms,
-                error_type="ValidationRuleMissing" if failed else None,
+                error_type=error_type,
+                scenario_id=self._scenario_id,
+                upstream_dependency=("payment-gateway" if provider_failed else None),
+                feature_flag=("wallet_validation_v2" if flag_failed else None),
             )
             self._events.append(event)
             return event
@@ -125,6 +207,10 @@ class CheckoutState:
                 p95_latency_ms=p95_latency_ms,
                 first_failure_at=failures[0].timestamp if failures else None,
                 deployments=list(self._deployments),
+                feature_flags=dict(self._feature_flags),
+                dependencies=dict(self._dependencies),
+                configuration_changes=list(self._configuration_changes),
+                scenario_id=self._scenario_id,
                 recent_events=list(events[-100:]),
             )
 

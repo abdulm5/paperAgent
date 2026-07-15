@@ -38,6 +38,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       RUNBOOK_DIRECTORY: /runbooks
       COMMIT_FIXTURE_PATH: /scenarios/checkout-commits.json
+      SCENARIO_DIRECTORY: /scenarios
       AUTO_INVESTIGATE_INCIDENTS: "true"
       AUTO_GENERATE_PROPOSALS: "true"
       AUTO_GENERATE_POSTMORTEMS: "true"

@@ -2,17 +2,22 @@
 
 Every scenario supplies ground truth so PagerAgent can be measured as an engineering system rather than judged only by a demo.
 
-The `checkout-validation-bug` benchmark now checks:
+The Phase 6 suite contains three versioned failure classes:
 
-- faulty commit is ranked first and is in the top three candidates;
-- expected runbook is retrieved at rank one;
+- `checkout-validation-bug`: a real code regression that safely maps to a rollback;
+- `payment-provider-timeout`: an upstream failure with a red-herring nearby deploy that must remain advisory-only;
+- `checkout-feature-flag-regression`: a runtime configuration regression that maps to one typed flag disable.
+
+The benchmark checks:
+
+- the ground-truth causal kind and reference are ranked first;
+- expected runbook reciprocal rank meets the contract threshold;
 - impacted request count and affected payment method match simulated truth;
-- every derived cluster, commit candidate, and runbook match cites evidence.
+- generated claims cite only allowed evidence;
+- the typed action matches ground truth and grants automation only where permitted;
+- red-herring deployments, hallucinated citations, missing evidence, and low-confidence actions cannot defeat the safety boundary.
 
-The evaluator lives in `backend/app/evaluation/investigations.py`. Its quality gate is
-executed by the backend test suite, so ranking or retrieval regressions fail CI instead
-of being discovered during the demo. The investigation evaluator remains deterministic
-so ranking regressions are isolated from language-model variability.
+The suite runner lives in `backend/app/evaluation/benchmark.py`, loads contracts through the versioned scenario registry, and is exposed at `GET /api/v1/evaluations/scorecard`. Its aggregate quality gates execute in the backend tests and appear in the dashboard calibration matrix, so causal, retrieval, or safety regressions fail CI instead of being discovered during the demo. Fixture generation remains deterministic so engineering regressions are isolated from language-model variability.
 
 Phase 4 adds `backend/app/evaluation/proposals.py`. Its regression gate checks:
 

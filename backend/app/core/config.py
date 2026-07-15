@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     backend_cors_origins: str = "http://localhost:5173"
     runbook_directory: Path = Path("../runbooks")
     commit_fixture_path: Path = Path("../scenarios/checkout-commits.json")
+    scenario_directory: Path = Path("../scenarios")
     auto_investigate_incidents: bool = False
     investigation_http_timeout_seconds: float = 5.0
     auto_generate_proposals: bool = True

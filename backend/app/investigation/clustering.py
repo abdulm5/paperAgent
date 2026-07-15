@@ -40,6 +40,20 @@ class ErrorClusterer:
                 for event in events
             )
             payment_methods = sorted({str(event.get("payment_method")) for event in events})
+            upstream_dependencies = sorted(
+                {
+                    str(event.get("upstream_dependency"))
+                    for event in events
+                    if event.get("upstream_dependency")
+                }
+            )
+            feature_flags = sorted(
+                {
+                    str(event.get("feature_flag"))
+                    for event in events
+                    if event.get("feature_flag")
+                }
+            )
             signature = canonical_hash(
                 {"error_type": error_type, "endpoint": endpoint, "release": release}
             )[:16]
@@ -51,6 +65,12 @@ class ErrorClusterer:
                     affected_attributes={
                         "payment_methods": payment_methods,
                         "releases": [release],
+                        **(
+                            {"upstream_dependencies": upstream_dependencies}
+                            if upstream_dependencies
+                            else {}
+                        ),
+                        **({"feature_flags": feature_flags} if feature_flags else {}),
                     },
                     failure_count=len(events),
                     first_seen_at=timestamps[0],

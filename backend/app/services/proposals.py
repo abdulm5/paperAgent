@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.copilot.actions import derive_action, required_runbook
 from app.copilot.citations import CitationValidator
 from app.copilot.execution import MitigationExecutor, SimulatorMitigationExecutor
 from app.copilot.synthesis import (
@@ -79,7 +80,12 @@ class ProposalService:
             select(MitigationProposalRecord)
             .where(
                 MitigationProposalRecord.investigation_id == investigation.id,
-                MitigationProposalRecord.status == ProposalStatus.PENDING_APPROVAL.value,
+                MitigationProposalRecord.status.in_(
+                    [
+                        ProposalStatus.PENDING_APPROVAL.value,
+                        ProposalStatus.ADVISORY.value,
+                    ]
+                ),
             )
             .order_by(MitigationProposalRecord.created_at.desc())
             .limit(1)
@@ -88,7 +94,11 @@ class ProposalService:
             return self.get(existing.id)
 
         detail = InvestigationService._to_detail(investigation)
-        if not detail.error_clusters or not detail.commit_candidates or not detail.runbook_matches:
+        if (
+            not detail.error_clusters
+            or not detail.cause_candidates
+            or not detail.runbook_matches
+        ):
             raise ProposalGenerationError("Investigation is missing ranked evidence")
         context = self._synthesis_context(incident, detail)
         try:
@@ -97,11 +107,14 @@ class ProposalService:
         except Exception as error:
             raise ProposalGenerationError(f"Grounded brief rejected: {error}") from error
 
-        top_commit = detail.commit_candidates[0]
+        top_cause = detail.cause_candidates[0]
         top_runbook = detail.runbook_matches[0]
-        if top_runbook.runbook_id != "checkout-api-rollback":
-            raise ProposalGenerationError("No allow-listed rollback runbook ranked first")
-        action = ActionEnvelope(expected_faulty_commit=top_commit.commit_sha)
+        action = derive_action(top_cause)
+        expected_runbook = required_runbook(action)
+        if top_runbook.runbook_id != expected_runbook:
+            raise ProposalGenerationError(
+                f"Expected safety runbook {expected_runbook} was not ranked first"
+            )
         prompt_version = str(
             getattr(self.synthesizer, "prompt_version", "grounded-incident-brief-v1")
         )
@@ -117,7 +130,11 @@ class ProposalService:
         proposal = MitigationProposalRecord(
             incident_id=incident.id,
             investigation_id=investigation.id,
-            status=ProposalStatus.PENDING_APPROVAL.value,
+            status=(
+                ProposalStatus.PENDING_APPROVAL.value
+                if action.automation_allowed
+                else ProposalStatus.ADVISORY.value
+            ),
             synthesizer_version=self.synthesizer.version,
             model_name=self.synthesizer.model_name,
             prompt_version=prompt_version,
@@ -132,10 +149,9 @@ class ProposalService:
             claims=[claim.model_dump(mode="json") for claim in brief.claims],
             action_type=action.action_type,
             action_target=action.target_service,
-            action_parameters={
-                "target_release": action.target_release,
-                "expected_faulty_commit": action.expected_faulty_commit,
-            },
+            action_parameters=action.model_dump(
+                mode="json", exclude={"action_type", "target_service"}
+            ),
         )
         self.session.add(proposal)
         self.session.flush()
@@ -146,7 +162,11 @@ class ProposalService:
                 actor="pageragent-copilot",
                 from_status=None,
                 to_status=incident.status,
-                note="Grounded incident brief and approval-gated rollback proposed.",
+                note=(
+                    "Grounded incident brief produced an advisory-only response."
+                    if not action.automation_allowed
+                    else "Grounded incident brief and approval-gated mitigation proposed."
+                ),
                 payload={
                     "proposal_id": str(proposal.id),
                     "investigation_id": str(investigation.id),
@@ -293,7 +313,9 @@ class ProposalService:
                 else ProposalStatus.EXECUTION_FAILED.value
             )
             if not result.recovery_verified:
-                proposal.failure_reason = "Rollback executed, but recovery verification failed"
+                proposal.failure_reason = (
+                    "Mitigation executed, but recovery verification failed"
+                )
                 execution.failure_reason = proposal.failure_reason
             self._record_execution_outcome(proposal, result.recovery_verified, now)
             self.session.commit()
@@ -329,7 +351,7 @@ class ProposalService:
                 from_status=from_status if verified else None,
                 to_status=incident.status,
                 note=(
-                    "Rollback canaries passed; incident automatically marked mitigated."
+                    "Mitigation canaries passed; incident automatically marked mitigated."
                     if verified
                     else "Approved mitigation did not pass recovery verification."
                 ),
@@ -361,6 +383,7 @@ class ProposalService:
             .options(
                 selectinload(InvestigationRunRecord.evidence),
                 selectinload(InvestigationRunRecord.error_clusters),
+                selectinload(InvestigationRunRecord.cause_candidates),
                 selectinload(InvestigationRunRecord.commit_candidates),
                 selectinload(InvestigationRunRecord.runbook_matches),
             )
@@ -398,6 +421,9 @@ class ProposalService:
             "error_clusters": [
                 item.model_dump(mode="json") for item in investigation.error_clusters
             ],
+            "cause_candidates": [
+                item.model_dump(mode="json") for item in investigation.cause_candidates
+            ],
             "commit_candidates": [
                 item.model_dump(mode="json") for item in investigation.commit_candidates
             ],
@@ -411,6 +437,7 @@ class ProposalService:
         records = [
             *investigation.evidence,
             *investigation.error_clusters,
+            *investigation.cause_candidates,
             *investigation.commit_candidates,
             *investigation.runbook_matches,
         ]
@@ -418,21 +445,29 @@ class ProposalService:
 
     @staticmethod
     def _action(proposal: MitigationProposalRecord) -> ActionEnvelope:
+        parameters = proposal.action_parameters
         return ActionEnvelope(
             action_type=proposal.action_type,
             target_service=proposal.action_target,
-            target_release=str(proposal.action_parameters["target_release"]),
-            expected_faulty_commit=str(
-                proposal.action_parameters["expected_faulty_commit"]
-            ),
+            target_release=parameters.get("target_release"),
+            expected_faulty_commit=parameters.get("expected_faulty_commit"),
+            feature_flag=parameters.get("feature_flag"),
+            automation_allowed=bool(parameters.get("automation_allowed")),
         )
 
     @staticmethod
     def _enforce_action_policy(action: ActionEnvelope) -> None:
-        if action.action_type != "rollback_service":
-            raise ApprovalPolicyError("Only rollback_service is allow-listed")
-        if action.target_service != "checkout-api" or action.target_release != "stable-v1":
+        if not action.automation_allowed or action.action_type == "escalate_only":
+            raise ApprovalPolicyError("Advisory-only responses cannot execute")
+        if action.target_service != "checkout-api":
+            raise ApprovalPolicyError("Action target is outside the simulator allow-list")
+        if action.action_type == "rollback_service" and action.target_release != "stable-v1":
             raise ApprovalPolicyError("Rollback target is outside the simulator allow-list")
+        if (
+            action.action_type == "disable_feature_flag"
+            and action.feature_flag != "wallet_validation_v2"
+        ):
+            raise ApprovalPolicyError("Feature flag is outside the simulator allow-list")
 
     @staticmethod
     def _to_detail(proposal: MitigationProposalRecord) -> MitigationProposalDetail:

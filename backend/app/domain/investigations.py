@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from app.domain.evaluations import CauseCandidate
+
 
 class InvestigationStatus(StrEnum):
     RUNNING = "running"
@@ -82,5 +84,6 @@ class InvestigationDetail(BaseModel):
     completed_at: datetime | None
     evidence: list[EvidenceArtifact]
     error_clusters: list[ErrorCluster]
+    cause_candidates: list[CauseCandidate]
     commit_candidates: list[CommitCandidate]
     runbook_matches: list[RunbookMatch]

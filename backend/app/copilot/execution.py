@@ -36,21 +36,29 @@ class SimulatorMitigationExecutor:
         )
 
     def execute(self, action: ActionEnvelope, idempotency_key: str) -> ExecutionResult:
-        if action.action_type != "rollback_service" or action.target_service != "checkout-api":
+        if action.target_service != "checkout-api" or not action.automation_allowed:
             raise ValueError("Executor policy rejected an unsupported mitigation action")
-        if action.target_release != "stable-v1":
+        if action.action_type == "rollback_service" and action.target_release != "stable-v1":
             raise ValueError("Executor policy only permits rollback to stable-v1")
+        if action.action_type == "disable_feature_flag" and not action.feature_flag:
+            raise ValueError("Executor requires a typed feature flag")
 
         before_response = self.client.get("/telemetry")
         before_response.raise_for_status()
         before = before_response.json()
 
-        deployment_response = self.client.post(
-            f"/admin/releases/{action.target_release}/activate",
-            headers={"X-Idempotency-Key": idempotency_key},
-        )
-        deployment_response.raise_for_status()
-        deployment = deployment_response.json()
+        if action.action_type == "rollback_service":
+            mutation_response = self.client.post(
+                f"/admin/releases/{action.target_release}/activate",
+                headers={"X-Idempotency-Key": idempotency_key},
+            )
+        else:
+            mutation_response = self.client.post(
+                f"/admin/feature-flags/{action.feature_flag}/disable",
+                headers={"X-Idempotency-Key": idempotency_key},
+            )
+        mutation_response.raise_for_status()
+        mutation = mutation_response.json()
 
         statuses: list[int] = []
         for index in range(1, self.canary_requests + 1):
@@ -72,25 +80,32 @@ class SimulatorMitigationExecutor:
         after_response = self.client.get("/telemetry")
         after_response.raise_for_status()
         after = after_response.json()
-        deployed_at = datetime.fromisoformat(str(deployment["deployed_at"]).replace("Z", "+00:00"))
+        changed_at_value = mutation.get("deployed_at") or mutation.get("changed_at")
+        changed_at = datetime.fromisoformat(str(changed_at_value).replace("Z", "+00:00"))
         recovery_events = [
             event
             for event in after.get("recent_events", [])
             if datetime.fromisoformat(str(event["timestamp"]).replace("Z", "+00:00"))
-            >= deployed_at
+            >= changed_at
         ]
         recovery_failures = [
             event for event in recovery_events if event.get("outcome") == "failure"
         ]
-        verified = (
+        target_verified = (
             after.get("current_release", {}).get("name") == action.target_release
+            if action.action_type == "rollback_service"
+            else after.get("feature_flags", {}).get(action.feature_flag) is False
+        )
+        verified = (
+            target_verified
             and len(recovery_events) >= self.canary_requests
             and not recovery_failures
             and all(status < 400 for status in statuses)
         )
         return ExecutionResult(
             response_payload={
-                "deployment": deployment,
+                "mutation": mutation,
+                "action_type": action.action_type,
                 "canary_request_count": len(statuses),
                 "canary_statuses": statuses,
                 "recovery_failure_count": len(recovery_failures),

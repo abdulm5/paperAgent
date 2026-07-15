@@ -1,0 +1,12 @@
+schema_version: "1.0"
+suite_version: "2026.07"
+required_scenarios:
+  - checkout-validation-bug
+  - payment-provider-timeout
+  - checkout-feature-flag-regression
+aggregate_gates:
+  cause_top_1: 1.0
+  runbook_mrr: 1.0
+  citation_coverage: 1.0
+  action_safety: 1.0
+  resilience: 1.0

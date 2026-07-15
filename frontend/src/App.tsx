@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { IncidentDetailPanel } from "./components/IncidentDetailPanel";
 import { IncidentQueue } from "./components/IncidentQueue";
+import { EvaluationPanel } from "./components/EvaluationPanel";
 import {
   decideProposal,
   finalizePostmortem,
@@ -9,6 +10,7 @@ import {
   generatePostmortem,
   getIncident,
   getIncidents,
+  getEvaluationScorecard,
   getLatestInvestigation,
   getLatestProposal,
   getPostmortem,
@@ -18,6 +20,7 @@ import {
   type IncidentDetail,
   type IncidentStatus,
   type IncidentSummary,
+  type EvaluationScorecard,
   type InvestigationDetail,
   type MitigationProposal,
   type PostmortemDetail,
@@ -32,6 +35,9 @@ export default function App() {
   const [loadingQueue, setLoadingQueue] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [scorecard, setScorecard] = useState<EvaluationScorecard | null>(null);
+  const [evaluationLoading, setEvaluationLoading] = useState(true);
+  const [evaluationError, setEvaluationError] = useState<string | null>(null);
   const [transitionError, setTransitionError] = useState<string | null>(null);
   const [transitioning, setTransitioning] = useState(false);
   const [investigation, setInvestigation] = useState<InvestigationDetail | null>(null);
@@ -60,6 +66,20 @@ export default function App() {
       setConnectionError(error instanceof Error ? error.message : "PagerAgent API is unavailable.");
     } finally {
       setLoadingQueue(false);
+    }
+  }, []);
+
+  const loadEvaluation = useCallback(async () => {
+    setEvaluationLoading(true);
+    try {
+      setScorecard(await getEvaluationScorecard());
+      setEvaluationError(null);
+    } catch (error) {
+      setEvaluationError(
+        error instanceof Error ? error.message : "Evaluation suite is unavailable.",
+      );
+    } finally {
+      setEvaluationLoading(false);
     }
   }, []);
 
@@ -115,9 +135,10 @@ export default function App() {
 
   useEffect(() => {
     void loadQueue();
+    void loadEvaluation();
     const refreshTimer = window.setInterval(() => void loadQueue(), 5_000);
     return () => window.clearInterval(refreshTimer);
-  }, [loadQueue]);
+  }, [loadEvaluation, loadQueue]);
 
   useEffect(() => {
     if (selectedId) {
@@ -276,6 +297,13 @@ export default function App() {
           <span>active incidents</span>
         </div>
       </section>
+
+      <EvaluationPanel
+        error={evaluationError}
+        loading={evaluationLoading}
+        onRefresh={loadEvaluation}
+        scorecard={scorecard}
+      />
 
       {connectionError ? (
         <div className="connection-error" role="alert">

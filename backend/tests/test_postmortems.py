@@ -29,6 +29,7 @@ from app.services.postmortems import (
     PostmortemService,
     PostmortemVersionConflictError,
 )
+from tests.test_evaluations import run_scenario_investigation
 from tests.test_proposals import (
     RecordingExecutor,
     incident_with_investigation,
@@ -145,6 +146,48 @@ def test_postmortem_is_grounded_in_resolved_audit_record(db_session: Session) ->
             *postmortem.content.timeline,
         ]
     )
+
+
+def test_feature_flag_postmortem_preserves_the_actual_cause_and_action(
+    db_session: Session,
+) -> None:
+    incident_id, _ = run_scenario_investigation(
+        db_session, "checkout-feature-flag-regression"
+    )
+    proposal = proposal_service(db_session, RecordingExecutor()).generate(incident_id)
+    incident_service = IncidentService(db_session)
+    incident_service.transition(
+        incident_id,
+        IncidentTransitionRequest(
+            to_status=IncidentStatus.INVESTIGATING,
+            actor="oncall@example.com",
+            expected_version=1,
+        ),
+    )
+    approved = proposal_service(db_session, RecordingExecutor()).decide(
+        proposal.id,
+        ProposalDecisionRequest(
+            decision="approve",
+            actor="oncall@example.com",
+            note="Approved the typed feature flag change.",
+        ),
+    )
+    assert approved.status == "verification_passed"
+    incident_service.transition(
+        incident_id,
+        IncidentTransitionRequest(
+            to_status=IncidentStatus.RESOLVED,
+            actor="incident-commander@example.com",
+            expected_version=3,
+        ),
+    )
+
+    postmortem = postmortem_service(db_session).generate(incident_id)
+
+    assert "wallet_validation_v2" in postmortem.content.root_cause.text
+    assert "without an application deployment" in postmortem.content.root_cause.text
+    assert "disabled wallet_validation_v2" in postmortem.content.resolution.text
+    assert "8fa23c1" not in postmortem.content.summary.text
 
 
 def test_postmortem_requires_resolved_incident(db_session: Session) -> None:

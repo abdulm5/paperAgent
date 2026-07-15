@@ -31,7 +31,13 @@ function ClaimCitations({ claim }: { claim: GroundedClaim | undefined }) {
   );
 }
 
-function telemetryRelease(payload: Record<string, unknown>): string {
+function telemetryState(payload: Record<string, unknown>, featureFlag: string | null): string {
+  if (featureFlag) {
+    const flags = payload.feature_flags;
+    if (typeof flags === "object" && flags !== null && featureFlag in flags) {
+      return `${featureFlag}=${String(flags[featureFlag as keyof typeof flags])}`;
+    }
+  }
   const release = payload.current_release;
   if (typeof release === "object" && release !== null && "name" in release) {
     return String(release.name);
@@ -73,11 +79,14 @@ export function ProposalPanel({
 
   const claims = Object.fromEntries(proposal.claims.map((claim) => [claim.kind, claim]));
   const pending = proposal.status === "pending_approval";
+  const advisory = proposal.status === "advisory";
   const verified = proposal.status === "verification_passed" && proposal.execution;
   const canApprove = incidentStatus === "investigating" && reviewed && !acting;
   const responsePayload = proposal.execution?.response_payload;
   const canaryCount = responsePayload?.canary_request_count;
   const failureCount = responsePayload?.recovery_failure_count;
+  const isFlagChange = proposal.action.action_type === "disable_feature_flag";
+  const actionLabel = isFlagChange ? "feature flag change" : "rollback";
 
   async function decide(decision: ProposalDecision) {
     await onDecision(decision, note);
@@ -139,16 +148,31 @@ export function ProposalPanel({
       <div className="authority-boundary">
         <div className="authority-rail">
           <span>Write boundary</span>
-          <strong>Human authority required</strong>
-          <small>The model cannot cross this line.</small>
+          <strong>{advisory ? "Write blocked" : "Human authority required"}</strong>
+          <small>
+            {advisory
+              ? "Evidence points outside this service's safe automation boundary."
+              : "The model cannot cross this line."}
+          </small>
         </div>
         <div className="action-envelope">
           <p className="brief-label">Typed action envelope</p>
           <dl>
             <div><dt>Action</dt><dd>{proposal.action.action_type}</dd></div>
             <div><dt>Service</dt><dd>{proposal.action.target_service}</dd></div>
-            <div><dt>From commit</dt><dd>{proposal.action.expected_faulty_commit}</dd></div>
-            <div><dt>Target</dt><dd>{proposal.action.target_release}</dd></div>
+            {proposal.action.expected_faulty_commit ? (
+              <div><dt>From commit</dt><dd>{proposal.action.expected_faulty_commit}</dd></div>
+            ) : null}
+            {proposal.action.target_release ? (
+              <div><dt>Target</dt><dd>{proposal.action.target_release}</dd></div>
+            ) : null}
+            {proposal.action.feature_flag ? (
+              <div><dt>Feature flag</dt><dd>{proposal.action.feature_flag}</dd></div>
+            ) : null}
+            <div>
+              <dt>Automation</dt>
+              <dd>{proposal.action.automation_allowed ? "approval gated" : "not permitted"}</dd>
+            </div>
           </dl>
           <ol>
             {proposal.verification_steps.map((step) => <li key={step}>{step}</li>)}
@@ -167,7 +191,7 @@ export function ProposalPanel({
                 onChange={(event) => setReviewed(event.target.checked)}
                 type="checkbox"
               />
-              I reviewed the cited evidence and rollback target.
+              I reviewed the cited evidence and {actionLabel} target.
             </label>
             <label>
               Decision note
@@ -184,7 +208,7 @@ export function ProposalPanel({
                 onClick={() => void decide("approve")}
                 type="button"
               >
-                {acting ? "Executing rollback…" : "Approve rollback"}
+                {acting ? "Executing change…" : `Approve ${actionLabel}`}
               </button>
               <button
                 className="reject-button"
@@ -198,14 +222,21 @@ export function ProposalPanel({
           </div>
         ) : null}
 
+        {advisory ? (
+          <div className="decision-receipt advisory-receipt">
+            <strong>Advisory only</strong>
+            <p>Escalate to the owning service. PagerAgent will not execute this action.</p>
+          </div>
+        ) : null}
+
         {verified ? (
           <div className="recovery-receipt">
             <p className="brief-label">Recovery receipt</p>
-            <strong>Rollback verified</strong>
+            <strong>{isFlagChange ? "Feature flag change verified" : "Rollback verified"}</strong>
             <div>
-              <span>{telemetryRelease(proposal.execution?.before_telemetry ?? {})}</span>
+              <span>{telemetryState(proposal.execution?.before_telemetry ?? {}, proposal.action.feature_flag)}</span>
               <b>→</b>
-              <span>{telemetryRelease(proposal.execution?.after_telemetry ?? {})}</span>
+              <span>{telemetryState(proposal.execution?.after_telemetry ?? {}, proposal.action.feature_flag)}</span>
             </div>
             <dl>
               <div><dt>Canaries</dt><dd>{String(canaryCount ?? "—")}</dd></div>

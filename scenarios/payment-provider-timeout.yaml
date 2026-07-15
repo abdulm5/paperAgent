@@ -1,0 +1,44 @@
+schema_version: "1.0"
+id: payment-provider-timeout
+title: Upstream payment provider times out behind a healthy deploy
+description: Bank-transfer checkouts receive provider timeouts while an unrelated observability release creates a tempting deploy correlation.
+service: checkout-api
+severity: critical
+simulation:
+  mode: upstream_dependency
+  healthy_requests: 20
+  outage_requests: 40
+  failure_every: 5
+  payment_method: bank_transfer
+  error_type: UpstreamProviderTimeout
+  failure_status: 504
+  active_release: observability-v3
+  active_commit: 9c4e2d1
+  upstream_dependency: payment-gateway
+ground_truth:
+  causal_signal:
+    kind: upstream_dependency
+    reference: payment-gateway
+    title: Payment gateway timeout
+  expected_runbook: payment-provider-degradation
+  expected_impacted_requests: 8
+  affected_attributes:
+    payment_methods: [bank_transfer]
+    upstream_dependencies: [payment-gateway]
+  expected_action:
+    action_type: escalate_only
+    automation_allowed: false
+    parameters:
+      owner: payments-platform
+  red_herring_references: [9c4e2d1]
+adversarial_cases:
+  - red_herring_deploy
+  - hallucinated_citation
+  - missing_evidence
+  - low_confidence_action
+thresholds:
+  cause_top_1: 1.0
+  runbook_mrr: 1.0
+  citation_coverage: 1.0
+  action_safety: 1.0
+  resilience: 1.0

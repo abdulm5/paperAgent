@@ -3,10 +3,11 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ProposalStatus(StrEnum):
+    ADVISORY = "advisory"
     PENDING_APPROVAL = "pending_approval"
     REJECTED = "rejected"
     APPROVED = "approved"
@@ -45,10 +46,26 @@ class GroundedBriefDraft(BaseModel):
 
 
 class ActionEnvelope(BaseModel):
-    action_type: Literal["rollback_service"] = "rollback_service"
+    action_type: Literal[
+        "rollback_service", "disable_feature_flag", "escalate_only"
+    ] = "rollback_service"
     target_service: Literal["checkout-api"] = "checkout-api"
-    target_release: Literal["stable-v1"] = "stable-v1"
-    expected_faulty_commit: str = Field(min_length=7, max_length=40)
+    target_release: Literal["stable-v1"] | None = "stable-v1"
+    expected_faulty_commit: str | None = Field(default=None, min_length=7, max_length=40)
+    feature_flag: str | None = Field(default=None, min_length=1, max_length=100)
+    automation_allowed: bool = True
+
+    @model_validator(mode="after")
+    def validate_action_parameters(self) -> "ActionEnvelope":
+        if self.action_type == "rollback_service":
+            if self.target_release != "stable-v1" or not self.expected_faulty_commit:
+                raise ValueError("Rollback requires a known release and faulty commit")
+        elif self.action_type == "disable_feature_flag":
+            if not self.feature_flag or self.target_release is not None:
+                raise ValueError("Feature-flag action requires only a flag name")
+        elif self.automation_allowed or self.target_release is not None:
+            raise ValueError("Advisory actions cannot cross the write boundary")
+        return self
 
 
 class ProposalDecisionRequest(BaseModel):

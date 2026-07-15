@@ -2,6 +2,19 @@
   "provider": "fixture-git-v1",
   "commits": [
     {
+      "sha": "9c4e2d1",
+      "title": "Add payment provider latency spans",
+      "author": "Nolan Brooks",
+      "minutes_before_deploy": 4,
+      "services": ["checkout-api"],
+      "owners": ["platform-observability"],
+      "change_types": ["observability"],
+      "files_changed": [
+        "services/checkout/telemetry/provider_spans.py"
+      ],
+      "diff_summary": "Add trace spans and metric labels around payment provider calls without changing request behavior."
+    },
+    {
       "sha": "8fa23c1",
       "title": "Refactor digital wallet validation rules",
       "author": "Maya Chen",

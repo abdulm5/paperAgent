@@ -33,3 +33,15 @@ def test_alert_preserves_metric_and_release_evidence() -> None:
     assert alert["metric"]["failed_request_count"] == 8
     assert alert["release"]["commit_sha"] == "8fa23c1"
     assert alert["telemetry_url"] == "http://checkout-api:8100/telemetry"
+
+
+def test_alert_metric_and_fingerprint_follow_the_active_scenario() -> None:
+    snapshot = telemetry_snapshot()
+    snapshot["scenario_id"] = "payment-provider-timeout"
+
+    alert = build_alert(snapshot, 0.05, "http://checkout-api:8100")
+
+    assert alert["metric"]["name"] == "upstream_timeout_rate"
+    assert alert["fingerprint"] == (
+        "checkout-api:upstream_timeout_rate:payment-provider-timeout"
+    )

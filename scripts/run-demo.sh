@@ -3,12 +3,31 @@
 set -euo pipefail
 
 AUTO_APPROVE=false
-if [[ "${1:-}" == "--approve" ]]; then
-  AUTO_APPROVE=true
-elif [[ -n "${1:-}" ]]; then
-  echo "Usage: $0 [--approve]" >&2
-  exit 2
-fi
+SCENARIO="checkout-validation-bug"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --approve)
+      AUTO_APPROVE=true
+      shift
+      ;;
+    --scenario)
+      SCENARIO="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "Usage: $0 [--approve] [--scenario SCENARIO_ID]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "$SCENARIO" in
+  checkout-validation-bug|payment-provider-timeout|checkout-feature-flag-regression) ;;
+  *)
+    echo "Unknown scenario: $SCENARIO" >&2
+    exit 2
+    ;;
+esac
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -40,11 +59,11 @@ echo "Sending 20 healthy checkout requests..."
 docker compose --profile tools run --rm traffic-generator \
   --requests 20 --delay 0 --run-id healthy
 
-echo "Deploying faulty-v2 (commit 8fa23c1)..."
+echo "Activating versioned scenario $SCENARIO..."
 curl --fail --silent --request POST \
-  http://localhost:8100/admin/releases/faulty-v2/activate | python3 -m json.tool
+  "http://localhost:8100/admin/scenarios/$SCENARIO/activate" | python3 -m json.tool
 
-echo "Sending 40 requests against the faulty release..."
+echo "Sending 40 requests through the active failure mode..."
 docker compose --profile tools run --rm traffic-generator \
   --requests 40 --delay 0 --run-id outage
 
@@ -82,11 +101,13 @@ import sys
 
 result = json.load(sys.stdin)
 cluster = result["error_clusters"][0]
+cause = result["cause_candidates"][0]
 commit = result["commit_candidates"][0]
 runbook = result["runbook_matches"][0]
 print("\nPagerAgent investigation complete")
 print("  Cluster: {} ({} failures)".format(cluster["error_type"], cluster["failure_count"]))
-print("  Suspect: #{} {} (score {:.4f})".format(commit["rank"], commit["commit_sha"], commit["total_score"]))
+print("  Cause: #{} {} / {} (score {:.4f})".format(cause["rank"], cause["kind"], cause["reference"], cause["score"]))
+print("  Deploy candidate: #{} {} (score {:.4f})".format(commit["rank"], commit["commit_sha"], commit["total_score"]))
 print("  Runbook: #{} {} (score {:.4f})".format(runbook["rank"], runbook["runbook_id"], runbook["total_score"]))
 print("  Evidence: {} immutable artifacts".format(len(result["evidence"])))
 '
@@ -120,15 +141,15 @@ for _ in {1..30}; do
       printf '%s' "$proposal" \
         | python3 -c 'import json, sys; print(json.load(sys.stdin)["status"])'
     )"
-    if [[ "$proposal_status" == "pending_approval" ]]; then
+    if [[ "$proposal_status" == "pending_approval" || "$proposal_status" == "advisory" ]]; then
       break
     fi
   fi
   sleep 0.5
 done
 
-if [[ "${proposal_status:-}" != "pending_approval" ]]; then
-  echo "The investigation completed, but no approval packet arrived." >&2
+if [[ "${proposal_status:-}" != "pending_approval" && "${proposal_status:-}" != "advisory" ]]; then
+  echo "The investigation completed, but no decision packet arrived." >&2
   exit 1
 fi
 
@@ -141,13 +162,21 @@ action = result["action"]
 print("\nGrounded copilot brief ready")
 print("  Synthesizer: {} ({})".format(result["synthesizer_version"], result["model_name"]))
 print("  Confidence: {:.1%}".format(result["confidence"]))
-print("  Action: {} {} -> {}".format(action["action_type"], action["target_service"], action["target_release"]))
+target = action.get("target_release") or action.get("feature_flag") or "owning-service escalation"
+print("  Action: {} {} -> {}".format(action["action_type"], action["target_service"], target))
+print("  Automation allowed: {}".format(action["automation_allowed"]))
 print("  Claims: {} with evidence citations".format(len(result["claims"])))
 '
 
+if [[ "$proposal_status" == "advisory" ]]; then
+  echo "PagerAgent stopped at the write boundary and produced an advisory-only escalation."
+  echo "Open http://localhost:5173 to inspect why the nearby deploy was rejected as causal."
+  exit 0
+fi
+
 if [[ "$AUTO_APPROVE" != "true" ]]; then
   echo "Human approval is still required. Open http://localhost:5173, begin the"
-  echo "investigation, review the citations, and approve or reject the rollback."
+  echo "investigation, review the citations, and approve or reject the typed action."
   echo "Run with --approve to exercise the explicit CLI approval path."
   exit 0
 fi
@@ -182,7 +211,7 @@ import json
 print(json.dumps({
     "decision": "approve",
     "actor": "demo-cli-operator",
-    "note": "Explicitly approved rollback after reviewing cited evidence.",
+    "note": "Explicitly approved the typed action after reviewing cited evidence.",
 }))
 ')"
 result="$(curl --fail --silent --request POST \

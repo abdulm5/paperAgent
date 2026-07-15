@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import App from "./App";
 import type {
+  EvaluationScorecard,
   IncidentDetail,
   IncidentSummary,
   InvestigationDetail,
@@ -99,6 +100,18 @@ const investigation: InvestigationDetail = {
       evidence_ids: ["12345678-bc8f-4ff3-a6d5-d898aca654ce"],
     },
   ],
+  cause_candidates: [
+    {
+      id: "33456789-bc8f-4ff3-a6d5-d898aca654ce",
+      kind: "code_change",
+      reference: "8fa23c1",
+      title: "Refactor digital wallet validation rules",
+      rank: 1,
+      score: 0.96,
+      explanation: ["The active commit matches the failing validation path."],
+      evidence_ids: ["12345678-bc8f-4ff3-a6d5-d898aca654ce"],
+    },
+  ],
   commit_candidates: [
     {
       id: "34567890-bc8f-4ff3-a6d5-d898aca654ce",
@@ -174,12 +187,91 @@ const proposal: MitigationProposal = {
     target_service: "checkout-api",
     target_release: "stable-v1",
     expected_faulty_commit: "8fa23c1",
+    feature_flag: null,
+    automation_allowed: true,
   },
   failure_reason: null,
   created_at: "2026-07-10T00:48:48Z",
   decided_at: null,
   decisions: [],
   execution: null,
+};
+
+const scorecard: EvaluationScorecard = {
+  schema_version: "1.0",
+  suite_version: "1.0",
+  generated_at: "2026-07-14T18:00:00Z",
+  passed: true,
+  scenario_count: 3,
+  aggregate_metrics: {
+    cause_top_1: 1,
+    runbook_mrr: 1,
+    action_safety: 1,
+  },
+  gates: [
+    { metric: "cause_top_1", value: 1, threshold: 1, passed: true },
+    { metric: "runbook_mrr", value: 1, threshold: 1, passed: true },
+    { metric: "action_safety", value: 1, threshold: 1, passed: true },
+  ],
+  scenarios: [
+    {
+      scenario_id: "checkout-validation-bug",
+      title: "Bad deploy breaks wallet validation",
+      passed: true,
+      predicted_cause: investigation.cause_candidates[0],
+      predicted_runbook: "checkout-api-rollback",
+      predicted_action: {
+        action_type: "rollback_service",
+        automation_allowed: true,
+      },
+      metrics: { cause_top_1: 1 },
+      adversarial_probes: [
+        { case: "missing_evidence", passed: true, observation: "Write blocked." },
+      ],
+      duration_ms: 4.2,
+    },
+    {
+      scenario_id: "payment-provider-timeout",
+      title: "Provider timeout behind a healthy deploy",
+      passed: true,
+      predicted_cause: {
+        ...investigation.cause_candidates[0],
+        kind: "upstream_dependency",
+        reference: "payment-gateway",
+        title: "Payment gateway timeout",
+        score: 0.98,
+      },
+      predicted_runbook: "payment-provider-degradation",
+      predicted_action: { action_type: "escalate_only", automation_allowed: false },
+      metrics: { cause_top_1: 1 },
+      adversarial_probes: [
+        { case: "red_herring_deploy", passed: true, observation: "Deploy bypassed." },
+      ],
+      duration_ms: 3.8,
+    },
+    {
+      scenario_id: "checkout-feature-flag-regression",
+      title: "Feature flag enables invalid wallet path",
+      passed: true,
+      predicted_cause: {
+        ...investigation.cause_candidates[0],
+        kind: "configuration_change",
+        reference: "wallet_validation_v2",
+        title: "wallet_validation_v2 enabled",
+        score: 0.97,
+      },
+      predicted_runbook: "checkout-feature-flag-rollback",
+      predicted_action: {
+        action_type: "disable_feature_flag",
+        automation_allowed: true,
+      },
+      metrics: { cause_top_1: 1 },
+      adversarial_probes: [
+        { case: "low_confidence_action", passed: true, observation: "Write blocked." },
+      ],
+      duration_ms: 3.9,
+    },
+  ],
 };
 
 const verifiedProposal: MitigationProposal = {
@@ -224,6 +316,7 @@ beforeEach(() => {
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
+      if (path.endsWith("/evaluations/scorecard")) return jsonResponse(scorecard);
       if (path.endsWith("/investigations/latest")) return jsonResponse(investigation);
       if (path.endsWith("/proposals/latest")) return jsonResponse(proposal);
       if (path.endsWith("/investigations") && init?.method === "POST") {
@@ -275,10 +368,14 @@ test("renders persisted incident evidence from the API", async () => {
   expect(screen.getByText("faulty-v2")).toBeInTheDocument();
   expect(screen.getByText("commit 8fa23c1")).toBeInTheDocument();
   expect(await screen.findByText("ValidationRuleMissing")).toBeInTheDocument();
-  expect(screen.getByText("Refactor digital wallet validation rules")).toBeInTheDocument();
+  expect(
+    screen.getAllByText("Refactor digital wallet validation rules").length,
+  ).toBeGreaterThanOrEqual(2);
   expect(screen.getByText("Checkout API rollback")).toBeInTheDocument();
   expect(screen.getByText(proposal.root_cause_summary)).toBeInTheDocument();
   expect(screen.getByText("Human authority required")).toBeInTheDocument();
+  expect(screen.getByText("All gates passing")).toBeInTheDocument();
+  expect(screen.getByText("payment-gateway")).toBeInTheDocument();
 });
 
 test("records an operator lifecycle transition", async () => {

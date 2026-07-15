@@ -3,7 +3,7 @@ import logging
 import sys
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, Query, status
+from fastapi import FastAPI, Header, HTTPException, Query, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.models import (
@@ -11,8 +11,11 @@ from app.models import (
     CheckoutRequest,
     CheckoutResponse,
     DeploymentEvent,
+    FeatureFlagResponse,
     ReleaseName,
     ResetResponse,
+    ScenarioName,
+    ScenarioStateResponse,
     TelemetrySnapshot,
 )
 from app.state import checkout_state
@@ -44,7 +47,7 @@ def health_check() -> dict[str, str]:
 @app.post(
     "/checkout",
     status_code=status.HTTP_201_CREATED,
-    responses={500: {"model": CheckoutFailure}},
+    responses={500: {"model": CheckoutFailure}, 504: {"model": CheckoutFailure}},
 )
 def create_checkout(
     checkout: CheckoutRequest,
@@ -59,12 +62,19 @@ def create_checkout(
     if event.outcome == "failure":
         failure = CheckoutFailure(
             error_code=event.error_type or "UnknownCheckoutFailure",
-            message="No validation rule exists for digital_wallet in this release.",
+            message=(
+                "The payment gateway timed out."
+                if event.error_type == "UpstreamProviderTimeout"
+                else "The active checkout path rejected this payment cohort."
+            ),
             request_id=request_id,
             trace_id=trace_id,
             release=event.release,
         )
-        return JSONResponse(status_code=500, content=failure.model_dump(mode="json"))
+        return JSONResponse(
+            status_code=event.http_status,
+            content=failure.model_dump(mode="json"),
+        )
 
     response = CheckoutResponse(
         order_id=f"order-{request_id}",
@@ -80,6 +90,23 @@ def activate_release(release: ReleaseName) -> DeploymentEvent:
     event = checkout_state.deploy(release)
     emit_structured_log("deployment.activated", event.model_dump(mode="json"))
     return event
+
+
+@app.post("/admin/scenarios/{scenario}/activate", response_model=ScenarioStateResponse)
+def activate_scenario(scenario: ScenarioName) -> ScenarioStateResponse:
+    response = checkout_state.activate_scenario(scenario)
+    emit_structured_log("scenario.activated", response.model_dump(mode="json"))
+    return response
+
+
+@app.post("/admin/feature-flags/{name}/disable", response_model=FeatureFlagResponse)
+def disable_feature_flag(name: str) -> FeatureFlagResponse:
+    try:
+        response = checkout_state.disable_feature_flag(name)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=f"Unknown feature flag: {name}") from error
+    emit_structured_log("feature_flag.disabled", response.model_dump(mode="json"))
+    return response
 
 
 @app.post("/admin/reset", response_model=ResetResponse)

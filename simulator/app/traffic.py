@@ -43,7 +43,7 @@ def run_traffic(
         )
         if response.status_code == 201:
             successful += 1
-        elif response.status_code == 500:
+        elif response.status_code >= 500:
             failed += 1
         else:
             response.raise_for_status()

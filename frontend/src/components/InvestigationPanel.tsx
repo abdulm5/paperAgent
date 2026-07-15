@@ -44,6 +44,7 @@ export function InvestigationPanel({
   }
 
   const primaryCluster = investigation.error_clusters[0];
+  const topCause = investigation.cause_candidates[0];
   const topRunbook = investigation.runbook_matches[0];
   const paymentMethods = primaryCluster?.affected_attributes.payment_methods;
   const cohort = Array.isArray(paymentMethods) ? paymentMethods.join(", ") : "unknown cohort";
@@ -88,12 +89,38 @@ export function InvestigationPanel({
         </div>
       ) : null}
 
+      {topCause ? (
+        <section className="causal-stack" aria-labelledby="causal-stack-title">
+          <div>
+            <p className="utility-label">Cross-signal causal ranker</p>
+            <h3 id="causal-stack-title">{topCause.title}</h3>
+            <code>{titleCase(topCause.kind)} / {topCause.reference}</code>
+          </div>
+          <div className="causal-score">
+            <strong>{Math.round(topCause.score * 100)}%</strong>
+            <span>causal confidence</span>
+          </div>
+          <ol>
+            {investigation.cause_candidates.slice(0, 4).map((cause) => (
+              <li className={cause.rank === 1 ? "active" : ""} key={cause.id ?? cause.reference}>
+                <span>{String(cause.rank).padStart(2, "0")}</span>
+                <div>
+                  <strong>{cause.reference}</strong>
+                  <small>{titleCase(cause.kind)}</small>
+                </div>
+                <b>{Math.round(cause.score * 100)}</b>
+              </li>
+            ))}
+          </ol>
+        </section>
+      ) : null}
+
       <div className="investigation-grid">
         <section className="candidate-dossier" aria-labelledby="candidate-title">
           <div className="subsection-heading">
             <div>
-              <p className="utility-label">Root-cause candidates</p>
-              <h3 id="candidate-title">Why this change?</h3>
+              <p className="utility-label">Deploy correlation</p>
+              <h3 id="candidate-title">Commit dossier</h3>
             </div>
             <span>Top {investigation.commit_candidates.length}</span>
           </div>

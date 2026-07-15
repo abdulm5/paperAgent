@@ -161,6 +161,12 @@ class InvestigationRunRecord(Base):
         order_by="CommitCandidateRecord.rank",
         passive_deletes=True,
     )
+    cause_candidates: Mapped[list["CauseCandidateRecord"]] = relationship(
+        back_populates="investigation",
+        cascade="all, delete-orphan",
+        order_by="CauseCandidateRecord.rank",
+        passive_deletes=True,
+    )
     runbook_matches: Mapped[list["RunbookMatchRecord"]] = relationship(
         back_populates="investigation",
         cascade="all, delete-orphan",
@@ -244,6 +250,29 @@ class CommitCandidateRecord(Base):
 
     investigation: Mapped[InvestigationRunRecord] = relationship(
         back_populates="commit_candidates"
+    )
+
+
+class CauseCandidateRecord(Base):
+    __tablename__ = "cause_candidates"
+    __table_args__ = (
+        Index("ix_cause_candidates_investigation_rank", "investigation_id", "rank"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    investigation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("investigation_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    reference: Mapped[str] = mapped_column(String(200), nullable=False)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    explanation: Mapped[list[str]] = mapped_column(json_document, nullable=False)
+    evidence_ids: Mapped[list[str]] = mapped_column(json_document, nullable=False)
+
+    investigation: Mapped[InvestigationRunRecord] = relationship(
+        back_populates="cause_candidates"
     )
 
 

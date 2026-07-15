@@ -13,6 +13,13 @@ class PaymentMethod(StrEnum):
 class ReleaseName(StrEnum):
     STABLE = "stable-v1"
     FAULTY = "faulty-v2"
+    OBSERVABILITY = "observability-v3"
+
+
+class ScenarioName(StrEnum):
+    VALIDATION_BUG = "checkout-validation-bug"
+    PROVIDER_TIMEOUT = "payment-provider-timeout"
+    FEATURE_FLAG_REGRESSION = "checkout-feature-flag-regression"
 
 
 class CheckoutRequest(BaseModel):
@@ -65,6 +72,17 @@ class TelemetryEvent(BaseModel):
     outcome: str
     latency_ms: float
     error_type: str | None = None
+    scenario_id: str = "healthy"
+    upstream_dependency: str | None = None
+    feature_flag: str | None = None
+
+
+class ConfigurationChange(BaseModel):
+    name: str
+    previous_value: bool
+    value: bool
+    changed_at: datetime
+    actor: str
 
 
 class TelemetrySnapshot(BaseModel):
@@ -80,6 +98,10 @@ class TelemetrySnapshot(BaseModel):
     p95_latency_ms: float
     first_failure_at: datetime | None
     deployments: list[DeploymentEvent]
+    feature_flags: dict[str, bool]
+    dependencies: dict[str, str]
+    configuration_changes: list[ConfigurationChange]
+    scenario_id: str
     recent_events: list[TelemetryEvent]
 
 
@@ -87,3 +109,16 @@ class ResetResponse(BaseModel):
     status: str = "reset"
     active_release: ReleaseName
     request_count: int = 0
+
+
+class ScenarioStateResponse(BaseModel):
+    scenario_id: ScenarioName
+    active_release: ReleaseName
+    feature_flags: dict[str, bool]
+    dependencies: dict[str, str]
+
+
+class FeatureFlagResponse(BaseModel):
+    name: str
+    value: bool
+    changed_at: datetime

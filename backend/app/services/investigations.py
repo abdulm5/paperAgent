@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
 from app.db.models import (
+    CauseCandidateRecord,
     CommitCandidateRecord,
     ErrorClusterRecord,
     EvidenceArtifactRecord,
@@ -16,6 +17,7 @@ from app.db.models import (
     InvestigationRunRecord,
     RunbookMatchRecord,
 )
+from app.domain.evaluations import CausalKind, CauseCandidate
 from app.domain.incidents import AlertPayload
 from app.domain.investigations import (
     CommitCandidate,
@@ -26,6 +28,7 @@ from app.domain.investigations import (
     RunbookMatch,
     RunbookSection,
 )
+from app.investigation.causes import CauseRanker
 from app.investigation.clustering import ErrorClusterer
 from app.investigation.collectors import HttpTelemetryCollector, TelemetryCollector
 from app.investigation.commits import CommitRanker, FixtureGitProvider, GitProvider
@@ -50,6 +53,7 @@ class InvestigationService:
         git_provider: GitProvider,
         clusterer: ErrorClusterer,
         commit_ranker: CommitRanker,
+        cause_ranker: CauseRanker,
         runbook_retriever: RunbookRetriever,
     ) -> None:
         self.session = session
@@ -57,6 +61,7 @@ class InvestigationService:
         self.git_provider = git_provider
         self.clusterer = clusterer
         self.commit_ranker = commit_ranker
+        self.cause_ranker = cause_ranker
         self.runbook_retriever = runbook_retriever
 
     def run(self, incident_id: UUID) -> InvestigationDetail:
@@ -70,6 +75,7 @@ class InvestigationService:
                 "collector": self.collector.version,
                 "clusterer": self.clusterer.version,
                 "ranker": self.commit_ranker.version,
+                "cause_ranker": self.cause_ranker.version,
                 "retriever": self.runbook_retriever.version,
                 "git_provider": self.git_provider.version,
             }
@@ -79,7 +85,7 @@ class InvestigationService:
             status=InvestigationStatus.RUNNING.value,
             collector_version=self.collector.version,
             clusterer_version=self.clusterer.version,
-            ranker_version=self.commit_ranker.version,
+            ranker_version=f"{self.commit_ranker.version}+{self.cause_ranker.version}",
             retrieval_version=self.runbook_retriever.version,
             input_hash=preflight_hash,
         )
@@ -103,6 +109,33 @@ class InvestigationService:
                     "deployments": telemetry.get("deployments", []),
                 },
             )
+            support_artifacts: list[EvidenceArtifactRecord] = []
+            if any(
+                event.get("upstream_dependency")
+                for event in telemetry.get("recent_events", [])
+            ):
+                support_artifacts.append(
+                    self._add_artifact(
+                        run.id,
+                        kind="dependency_health",
+                        source_uri=f"{str(alert.telemetry_url)}#dependencies",
+                        payload={"dependencies": telemetry.get("dependencies", {})},
+                    )
+                )
+            if telemetry.get("configuration_changes"):
+                support_artifacts.append(
+                    self._add_artifact(
+                        run.id,
+                        kind="configuration_history",
+                        source_uri=f"{str(alert.telemetry_url)}#configuration-changes",
+                        payload={
+                            "feature_flags": telemetry.get("feature_flags", {}),
+                            "configuration_changes": telemetry.get(
+                                "configuration_changes", []
+                            ),
+                        },
+                    )
+                )
             self.session.flush()
 
             cluster_results = self.clusterer.cluster(telemetry)
@@ -153,6 +186,7 @@ class InvestigationService:
                 str(telemetry_artifact.id),
                 str(deployment_artifact.id),
                 str(commit_catalog.id),
+                *(str(artifact.id) for artifact in support_artifacts),
                 *(str(cluster.id) for cluster in cluster_records),
             ]
             for rank, candidate in enumerate(ranked_commits[:3], start=1):
@@ -168,6 +202,21 @@ class InvestigationService:
                         files_changed=candidate.commit.files_changed,
                         diff_summary=candidate.commit.diff_summary,
                         feature_scores=candidate.feature_scores,
+                        explanation=candidate.explanation,
+                        evidence_ids=common_evidence_ids,
+                    )
+                )
+
+            cause_candidates = self.cause_ranker.rank(telemetry, ranked_commits)
+            for candidate in cause_candidates[:3]:
+                self.session.add(
+                    CauseCandidateRecord(
+                        investigation_id=run.id,
+                        kind=candidate.kind.value,
+                        reference=candidate.reference,
+                        title=candidate.title,
+                        rank=candidate.rank,
+                        score=candidate.score,
                         explanation=candidate.explanation,
                         evidence_ids=common_evidence_ids,
                     )
@@ -217,6 +266,7 @@ class InvestigationService:
                         evidence_ids=[
                             str(telemetry_artifact.id),
                             str(runbook_corpus.id),
+                            *(str(artifact.id) for artifact in support_artifacts),
                             *(str(cluster.id) for cluster in cluster_records),
                         ],
                     )
@@ -231,6 +281,7 @@ class InvestigationService:
                             deployment_artifact.content_hash,
                             commit_catalog.content_hash,
                             runbook_corpus.content_hash,
+                            *(artifact.content_hash for artifact in support_artifacts),
                         ]
                     ),
                 }
@@ -238,6 +289,7 @@ class InvestigationService:
             run.status = InvestigationStatus.COMPLETED.value
             run.completed_at = datetime.now(UTC)
             top_commit = ranked_commits[0] if ranked_commits else None
+            top_cause = cause_candidates[0]
             top_runbook = runbook_matches[0] if runbook_matches else None
             self.session.add(
                 IncidentEventRecord(
@@ -250,6 +302,11 @@ class InvestigationService:
                     payload={
                         "investigation_id": str(run.id),
                         "top_commit": top_commit.commit.sha if top_commit else None,
+                        "top_cause": {
+                            "kind": top_cause.kind.value,
+                            "reference": top_cause.reference,
+                            "score": top_cause.score,
+                        },
                         "top_runbook": (
                             top_runbook.document.runbook_id if top_runbook else None
                         ),
@@ -289,6 +346,7 @@ class InvestigationService:
             .options(
                 selectinload(InvestigationRunRecord.evidence),
                 selectinload(InvestigationRunRecord.error_clusters),
+                selectinload(InvestigationRunRecord.cause_candidates),
                 selectinload(InvestigationRunRecord.commit_candidates),
                 selectinload(InvestigationRunRecord.runbook_matches),
             )
@@ -332,6 +390,10 @@ class InvestigationService:
 
     @staticmethod
     def _failure_mode(alert: AlertPayload) -> str:
+        if alert.metric.name == "upstream_timeout_rate":
+            return "upstream-timeouts"
+        if alert.metric.name == "checkout_feature_error_rate":
+            return "feature-flag-regression"
         if "error_rate" in alert.metric.name:
             return "elevated-500-errors"
         return alert.metric.name.replace("_", "-")
@@ -389,6 +451,19 @@ class InvestigationService:
                 )
                 for item in run.error_clusters
             ],
+            cause_candidates=[
+                CauseCandidate(
+                    id=item.id,
+                    kind=CausalKind(item.kind),
+                    reference=item.reference,
+                    title=item.title,
+                    rank=item.rank,
+                    score=item.score,
+                    explanation=item.explanation,
+                    evidence_ids=item.evidence_ids,
+                )
+                for item in run.cause_candidates
+            ],
             commit_candidates=[
                 CommitCandidate(
                     id=item.id,
@@ -435,5 +510,6 @@ def build_investigation_service(session: Session) -> InvestigationService:
         git_provider=FixtureGitProvider(settings.commit_fixture_path),
         clusterer=ErrorClusterer(),
         commit_ranker=CommitRanker(),
+        cause_ranker=CauseRanker(),
         runbook_retriever=RunbookRetriever(settings.runbook_directory),
     )

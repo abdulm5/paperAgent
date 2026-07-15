@@ -109,6 +109,23 @@ export interface RunbookMatch {
   evidence_ids: string[];
 }
 
+export type CausalKind =
+  | "code_change"
+  | "configuration_change"
+  | "upstream_dependency"
+  | "unknown";
+
+export interface CauseCandidate {
+  id: string | null;
+  kind: CausalKind;
+  reference: string;
+  title: string;
+  rank: number;
+  score: number;
+  explanation: string[];
+  evidence_ids: string[];
+}
+
 export interface InvestigationDetail {
   id: string;
   incident_id: string;
@@ -123,12 +140,14 @@ export interface InvestigationDetail {
   completed_at: string | null;
   evidence: EvidenceArtifact[];
   error_clusters: ErrorCluster[];
+  cause_candidates: CauseCandidate[];
   commit_candidates: CommitCandidate[];
   runbook_matches: RunbookMatch[];
 }
 
 export type ProposalStatus =
   | "pending_approval"
+  | "advisory"
   | "rejected"
   | "approved"
   | "executing"
@@ -184,10 +203,12 @@ export interface MitigationProposal {
   slack_update: string;
   claims: GroundedClaim[];
   action: {
-    action_type: "rollback_service";
+    action_type: "rollback_service" | "disable_feature_flag" | "escalate_only";
     target_service: "checkout-api";
-    target_release: "stable-v1";
-    expected_faulty_commit: string;
+    target_release: string | null;
+    expected_faulty_commit: string | null;
+    feature_flag: string | null;
+    automation_allowed: boolean;
   };
   failure_reason: string | null;
   created_at: string;
@@ -281,6 +302,42 @@ export interface PostmortemEditPayload {
   }>;
 }
 
+export interface AdversarialProbeResult {
+  case: string;
+  passed: boolean;
+  observation: string;
+}
+
+export interface ScenarioEvaluationResult {
+  scenario_id: string;
+  title: string;
+  passed: boolean;
+  predicted_cause: CauseCandidate;
+  predicted_runbook: string | null;
+  predicted_action: Record<string, string | boolean | null>;
+  metrics: Record<string, number>;
+  adversarial_probes: AdversarialProbeResult[];
+  duration_ms: number;
+}
+
+export interface EvaluationGate {
+  metric: string;
+  value: number;
+  threshold: number;
+  passed: boolean;
+}
+
+export interface EvaluationScorecard {
+  schema_version: "1.0";
+  suite_version: string;
+  generated_at: string;
+  passed: boolean;
+  scenario_count: number;
+  aggregate_metrics: Record<string, number>;
+  gates: EvaluationGate[];
+  scenarios: ScenarioEvaluationResult[];
+}
+
 export class ApiError extends Error {
   status: number;
 
@@ -304,6 +361,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getIncidents(): Promise<IncidentSummary[]> {
   return request<IncidentSummary[]>("/api/v1/incidents");
+}
+
+export function getEvaluationScorecard(): Promise<EvaluationScorecard> {
+  return request<EvaluationScorecard>("/api/v1/evaluations/scorecard");
 }
 
 export function getIncident(incidentId: string): Promise<IncidentDetail> {

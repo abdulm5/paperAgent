@@ -21,19 +21,24 @@ def build_alert(
 ) -> dict[str, Any]:
     release = snapshot["current_release"]
     error_rate = snapshot["error_rate"]
+    scenario_id = str(snapshot.get("scenario_id") or "unclassified")
+    metric_name = {
+        "payment-provider-timeout": "upstream_timeout_rate",
+        "checkout-feature-flag-regression": "checkout_feature_error_rate",
+    }.get(scenario_id, "http_server_error_rate")
     return {
-        "fingerprint": f"checkout-api:http-server-error-rate:{release['name']}",
+        "fingerprint": f"checkout-api:{metric_name}:{scenario_id}",
         "source": "simulated-threshold-evaluator",
         "service": "checkout-api",
         "severity": "critical" if error_rate >= 0.1 else "high",
         "summary": (
-            f"Checkout API error rate is {error_rate:.1%}, "
+            f"Checkout API {metric_name.replace('_', ' ')} is {error_rate:.1%}, "
             f"above the {threshold:.1%} threshold."
         ),
         "started_at": snapshot["first_failure_at"],
         "detected_at": snapshot["observed_at"],
         "metric": {
-            "name": "http_server_error_rate",
+            "name": metric_name,
             "value": error_rate,
             "threshold": threshold,
             "window_seconds": snapshot["window_seconds"],

@@ -28,6 +28,7 @@ class DeterministicPostmortemGenerator:
         incident = context["incident"]
         alert = context["alert"]
         cluster = context["investigation"]["error_clusters"][0]
+        cause = context["investigation"]["cause_candidates"][0]
         commit = context["investigation"]["commit_candidates"][0]
         proposal = context["proposal"]
         execution = proposal["execution"]
@@ -37,6 +38,21 @@ class DeterministicPostmortemGenerator:
         approval_event = events["proposal.approved"]
         recovery_event = events["mitigation.recovery_verified"]
         resolution_event = events["incident.status_changed"]
+
+        if proposal["action"]["action_type"] == "disable_feature_flag":
+            return self._feature_flag_draft(
+                incident=incident,
+                alert=alert,
+                cluster=cluster,
+                cause=cause,
+                proposal=proposal,
+                execution=execution,
+                detection_event=detection_event,
+                investigation_event=investigation_event,
+                approval_event=approval_event,
+                recovery_event=recovery_event,
+                resolution_event=resolution_event,
+            )
 
         summary = (
             f"{incident['service']} returned errors for the digital_wallet checkout cohort after "
@@ -160,6 +176,136 @@ class DeterministicPostmortemGenerator:
                     owner="platform-observability",
                     priority=PreventionPriority.P2,
                     evidence_ids=[detection_event["id"], cluster["id"]],
+                ),
+            ],
+        )
+
+    @staticmethod
+    def _feature_flag_draft(
+        *,
+        incident: dict[str, Any],
+        alert: dict[str, Any],
+        cluster: dict[str, Any],
+        cause: dict[str, Any],
+        proposal: dict[str, Any],
+        execution: dict[str, Any],
+        detection_event: dict[str, Any],
+        investigation_event: dict[str, Any],
+        approval_event: dict[str, Any],
+        recovery_event: dict[str, Any],
+        resolution_event: dict[str, Any],
+    ) -> PostmortemNarrativeDraft:
+        flag = proposal["action"]["feature_flag"]
+        payment_methods = cluster["affected_attributes"].get("payment_methods", [])
+        cohort = ", ".join(payment_methods) or "affected"
+        summary = (
+            f"{incident['service']} returned errors for the {cohort} checkout cohort after "
+            f"feature flag {flag} was enabled. PagerAgent ranked the configuration change as "
+            "causal, an operator approved a typed flag disable, recovery canaries passed, and "
+            "the incident was resolved."
+        )
+        root_cause = (
+            f"Feature flag {flag} enabled an invalid checkout path. That configuration change "
+            f"produced {cluster['error_type']} on {cluster['endpoint']} for the affected "
+            "payment-method cohort without an application deployment."
+        )
+        impact = (
+            f"{cluster['failure_count']} of {alert['metric']['request_count']} observed checkout "
+            f"requests failed ({alert['metric']['value']:.1%}). The failures were isolated to "
+            f"{cohort} requests while {flag} was enabled."
+        )
+        detection = (
+            f"The simulated threshold evaluator detected a {alert['metric']['value']:.1%} "
+            f"checkout error rate above the {alert['metric']['threshold']:.1%} threshold and "
+            "created the incident from structured telemetry."
+        )
+        resolution = (
+            f"After human approval, the executor disabled {flag} on "
+            f"{proposal['action']['target_service']}. "
+            f"{execution['response_payload']['canary_request_count']} recovery canaries completed "
+            f"with {execution['response_payload']['recovery_failure_count']} failures before the "
+            "incident was marked mitigated and later resolved."
+        )
+
+        return PostmortemNarrativeDraft(
+            title=f"{incident['service']} feature-flag validation incident",
+            summary=GroundedSection(
+                text=summary,
+                evidence_ids=[detection_event["id"], recovery_event["id"], resolution_event["id"]],
+            ),
+            root_cause=GroundedSection(
+                text=root_cause,
+                evidence_ids=[cause["id"], cluster["id"]],
+            ),
+            customer_impact=GroundedSection(
+                text=impact,
+                evidence_ids=[cluster["id"], detection_event["id"]],
+            ),
+            detection=GroundedSection(
+                text=detection,
+                evidence_ids=[detection_event["id"]],
+            ),
+            resolution=GroundedSection(
+                text=resolution,
+                evidence_ids=[approval_event["id"], execution["id"], recovery_event["id"]],
+            ),
+            what_went_well=[
+                GroundedObservation(
+                    text="Configuration history distinguished the flag change from a deploy.",
+                    evidence_ids=[cause["id"], investigation_event["id"]],
+                ),
+                GroundedObservation(
+                    text="The mitigation was constrained to the evidence-backed feature flag.",
+                    evidence_ids=[approval_event["id"], recovery_event["id"]],
+                ),
+                GroundedObservation(
+                    text="Cohort-specific canaries verified recovery before mitigation closed.",
+                    evidence_ids=[cluster["id"], recovery_event["id"]],
+                ),
+            ],
+            what_went_poorly=[
+                GroundedObservation(
+                    text=(
+                        "The flag reached the full wallet cohort without a blocking validation "
+                        "check."
+                    ),
+                    evidence_ids=[cause["id"], cluster["id"]],
+                ),
+                GroundedObservation(
+                    text="The rollout lacked an automatic error-rate guard tied to the flag.",
+                    evidence_ids=[detection_event["id"], cause["id"]],
+                ),
+            ],
+            prevention_items=[
+                PreventionItem(
+                    title="Add feature-flag contract tests",
+                    description=(
+                        "Validate wallet rule compatibility before wallet_validation_v2 can be "
+                        "enabled in any environment."
+                    ),
+                    owner="payments-platform",
+                    priority=PreventionPriority.P1,
+                    evidence_ids=[cause["id"], cluster["id"]],
+                ),
+                PreventionItem(
+                    title="Add staged flag rollout guards",
+                    description=(
+                        "Ramp checkout flags by cohort and automatically halt when the cohort "
+                        "error rate crosses its threshold."
+                    ),
+                    owner="release-engineering",
+                    priority=PreventionPriority.P1,
+                    evidence_ids=[detection_event["id"], cause["id"]],
+                ),
+                PreventionItem(
+                    title="Audit runtime configuration changes",
+                    description=(
+                        "Keep flag actor, value, and timestamp evidence adjacent to service "
+                        "telemetry for incident response."
+                    ),
+                    owner="platform-observability",
+                    priority=PreventionPriority.P2,
+                    evidence_ids=[investigation_event["id"], cause["id"]],
                 ),
             ],
         )

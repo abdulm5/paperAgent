@@ -5,28 +5,32 @@ import type {
   IncidentStatus,
   InvestigationDetail,
   MitigationProposal,
+  Permission,
   PostmortemDetail,
   PostmortemEditPayload,
   ProposalDecision,
+  WorkflowRun,
+  WorkflowStreamStatus,
 } from "../lib/api";
 import { formatDuration, formatTimestamp, titleCase } from "../lib/format";
 import { InvestigationPanel } from "./InvestigationPanel";
 import { ProposalPanel } from "./ProposalPanel";
 import { PostmortemPanel } from "./PostmortemPanel";
+import { WorkflowDispatch } from "./WorkflowDispatch";
+import { AuthorityNote } from "./AuthorityNote";
 
 const nextStatus: Partial<Record<IncidentStatus, IncidentStatus>> = {
   detected: "investigating",
-  investigating: "mitigated",
   mitigated: "resolved",
 };
 
 const actionLabel: Partial<Record<IncidentStatus, string>> = {
   detected: "Begin investigation",
-  investigating: "Mark mitigated",
   mitigated: "Resolve incident",
 };
 
 interface IncidentDetailPanelProps {
+  permissions: Permission[];
   incident: IncidentDetail | null;
   loading: boolean;
   transitionError: string | null;
@@ -50,9 +54,14 @@ interface IncidentDetailPanelProps {
   onGeneratePostmortem: () => Promise<void>;
   onSavePostmortem: (edit: PostmortemEditPayload) => Promise<void>;
   onFinalizePostmortem: (note: string) => Promise<void>;
+  workflows: WorkflowRun[];
+  workflowLoading: boolean;
+  workflowError: string | null;
+  workflowStreamStatus: WorkflowStreamStatus;
 }
 
 export function IncidentDetailPanel({
+  permissions,
   incident,
   loading,
   transitionError,
@@ -76,6 +85,10 @@ export function IncidentDetailPanel({
   onGeneratePostmortem,
   onSavePostmortem,
   onFinalizePostmortem,
+  workflows,
+  workflowLoading,
+  workflowError,
+  workflowStreamStatus,
 }: IncidentDetailPanelProps) {
   const [note, setNote] = useState("");
 
@@ -92,10 +105,16 @@ export function IncidentDetailPanel({
   }
 
   const upcomingStatus = nextStatus[incident.status];
+  const transitionPermission: Permission | null = upcomingStatus === "resolved"
+    ? "incidents.resolve"
+    : upcomingStatus
+      ? "incidents.transition"
+      : null;
+  const canTransition = transitionPermission === null || permissions.includes(transitionPermission);
   const metric = incident.alert.metric;
 
   async function submitTransition() {
-    if (upcomingStatus === undefined) return;
+    if (upcomingStatus === undefined || !canTransition) return;
     if (await onTransition(upcomingStatus, note)) setNote("");
   }
 
@@ -133,6 +152,13 @@ export function IncidentDetailPanel({
         </div>
       </div>
 
+      <WorkflowDispatch
+        error={workflowError}
+        loading={workflowLoading}
+        streamStatus={workflowStreamStatus}
+        workflows={workflows}
+      />
+
       <section className="evidence-section" aria-labelledby="evidence-title">
         <div className="section-title-row">
           <div>
@@ -169,6 +195,7 @@ export function IncidentDetailPanel({
       </section>
 
       <InvestigationPanel
+        canRun={permissions.includes("investigations.run")}
         error={investigationError}
         investigation={investigation}
         loading={investigationLoading}
@@ -178,6 +205,8 @@ export function IncidentDetailPanel({
 
       <ProposalPanel
         acting={proposalActing}
+        canDecide={permissions.includes("mitigations.decide")}
+        canGenerate={permissions.includes("proposals.generate")}
         error={proposalError}
         incidentStatus={incident.status}
         loading={proposalLoading}
@@ -231,17 +260,34 @@ export function IncidentDetailPanel({
               value={note}
             />
           </label>
-          <button disabled={transitioning} onClick={submitTransition} type="button">
+          <button disabled={transitioning || !canTransition} onClick={submitTransition} type="button">
             {transitioning ? "Recording…" : actionLabel[incident.status]}
           </button>
-          {transitionError ? <p className="action-error">{transitionError}</p> : null}
+          {transitionPermission ? (
+            <AuthorityNote
+              allowed={canTransition}
+              message={upcomingStatus === "resolved"
+                ? "Only a responder with closure authority can resolve this incident."
+                : "This role can inspect the incident but cannot advance its response state."}
+              permission={transitionPermission}
+            />
+          ) : null}
+          {transitionError ? <p className="action-error" role="alert">{transitionError}</p> : null}
         </section>
+      ) : incident.status === "investigating" ? (
+        <div className="verification-banner">
+          <strong>Mitigation state is execution-owned.</strong>
+          <span>Approve a grounded action above; only verified recovery telemetry can mark this incident mitigated.</span>
+        </div>
       ) : (
         <div className="resolved-banner">Incident closed · timeline preserved for review</div>
       )}
 
       <PostmortemPanel
         acting={postmortemActing}
+        canEdit={permissions.includes("postmortems.edit")}
+        canFinalize={permissions.includes("postmortems.finalize")}
+        canGenerate={permissions.includes("postmortems.generate")}
         error={postmortemError}
         incidentStatus={incident.status}
         loading={postmortemLoading}

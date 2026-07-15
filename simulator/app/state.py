@@ -24,6 +24,10 @@ RELEASE_COMMITS = {
 }
 
 
+class IdempotencyConflictError(ValueError):
+    """Raised when one idempotency key is reused for a different mutation."""
+
+
 class CheckoutState:
     """In-memory state makes each demo run deterministic and easy to reset."""
 
@@ -37,6 +41,9 @@ class CheckoutState:
         self._feature_flags: dict[str, bool] = {"wallet_validation_v2": False}
         self._dependencies: dict[str, str] = {"payment-gateway": "healthy"}
         self._configuration_changes: list[ConfigurationChange] = []
+        self._idempotency_results: dict[
+            str, tuple[str, DeploymentEvent | FeatureFlagResponse]
+        ] = {}
         self.reset()
 
     def reset(self) -> ResetResponse:
@@ -49,6 +56,7 @@ class CheckoutState:
             self._feature_flags = {"wallet_validation_v2": False}
             self._dependencies = {"payment-gateway": "healthy"}
             self._configuration_changes = []
+            self._idempotency_results = {}
             self._deployments = [
                 DeploymentEvent(
                     previous_release=None,
@@ -59,8 +67,23 @@ class CheckoutState:
             ]
             return ResetResponse(active_release=self._active_release)
 
-    def deploy(self, release: ReleaseName) -> DeploymentEvent:
+    def deploy(
+        self, release: ReleaseName, idempotency_key: str | None = None
+    ) -> DeploymentEvent:
         with self._lock:
+            mutation = f"activate-release:{release.value}"
+            if idempotency_key:
+                cached = self._idempotency_results.get(idempotency_key)
+                if cached is not None:
+                    cached_mutation, cached_response = cached
+                    if cached_mutation != mutation:
+                        raise IdempotencyConflictError(
+                            "Idempotency key was already used for a different mutation"
+                        )
+                    if not isinstance(cached_response, DeploymentEvent):
+                        raise RuntimeError("Cached idempotency response has the wrong type")
+                    return cached_response
+
             now = datetime.now(UTC)
             event = DeploymentEvent(
                 previous_release=self._active_release,
@@ -71,6 +94,8 @@ class CheckoutState:
             self._active_release = release
             self._deployed_at = now
             self._deployments.append(event)
+            if idempotency_key:
+                self._idempotency_results[idempotency_key] = (mutation, event)
             return event
 
     def activate_scenario(self, scenario: ScenarioName) -> ScenarioStateResponse:
@@ -100,10 +125,25 @@ class CheckoutState:
                 dependencies=dict(self._dependencies),
             )
 
-    def disable_feature_flag(self, name: str) -> FeatureFlagResponse:
+    def disable_feature_flag(
+        self, name: str, idempotency_key: str | None = None
+    ) -> FeatureFlagResponse:
         with self._lock:
             if name not in self._feature_flags:
                 raise KeyError(name)
+            mutation = f"disable-feature-flag:{name}"
+            if idempotency_key:
+                cached = self._idempotency_results.get(idempotency_key)
+                if cached is not None:
+                    cached_mutation, cached_response = cached
+                    if cached_mutation != mutation:
+                        raise IdempotencyConflictError(
+                            "Idempotency key was already used for a different mutation"
+                        )
+                    if not isinstance(cached_response, FeatureFlagResponse):
+                        raise RuntimeError("Cached idempotency response has the wrong type")
+                    return cached_response
+
             now = datetime.now(UTC)
             previous = self._feature_flags[name]
             self._feature_flags[name] = False
@@ -116,7 +156,10 @@ class CheckoutState:
                     actor="pageragent-executor",
                 )
             )
-            return FeatureFlagResponse(name=name, value=False, changed_at=now)
+            response = FeatureFlagResponse(name=name, value=False, changed_at=now)
+            if idempotency_key:
+                self._idempotency_results[idempotency_key] = (mutation, response)
+            return response
 
     def record_checkout(
         self,

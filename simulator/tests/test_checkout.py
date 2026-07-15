@@ -134,3 +134,82 @@ def test_feature_flag_scenario_recovers_after_typed_flag_change() -> None:
         True,
         False,
     ]
+
+
+def test_release_activation_is_effectively_once_for_the_same_idempotency_key() -> None:
+    client = TestClient(app)
+    headers = {"X-Idempotency-Key": "proposal-release-123"}
+
+    first = client.post("/admin/releases/faulty-v2/activate", headers=headers)
+    replay = client.post("/admin/releases/faulty-v2/activate", headers=headers)
+    telemetry = client.get("/telemetry").json()
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json() == first.json()
+    assert len(telemetry["deployments"]) == 2
+    assert [deployment["release"] for deployment in telemetry["deployments"]] == [
+        "stable-v1",
+        "faulty-v2",
+    ]
+
+
+def test_different_release_idempotency_keys_create_independent_mutations() -> None:
+    client = TestClient(app)
+
+    client.post(
+        "/admin/releases/faulty-v2/activate",
+        headers={"X-Idempotency-Key": "proposal-release-a"},
+    )
+    client.post(
+        "/admin/releases/faulty-v2/activate",
+        headers={"X-Idempotency-Key": "proposal-release-b"},
+    )
+    telemetry = client.get("/telemetry").json()
+
+    assert len(telemetry["deployments"]) == 3
+    assert [deployment["release"] for deployment in telemetry["deployments"]] == [
+        "stable-v1",
+        "faulty-v2",
+        "faulty-v2",
+    ]
+
+
+def test_feature_flag_disable_is_effectively_once_per_idempotency_key() -> None:
+    client = TestClient(app)
+    client.post("/admin/scenarios/checkout-feature-flag-regression/activate")
+    headers = {"X-Idempotency-Key": "proposal-flag-123"}
+
+    first = client.post(
+        "/admin/feature-flags/wallet_validation_v2/disable", headers=headers
+    )
+    replay = client.post(
+        "/admin/feature-flags/wallet_validation_v2/disable", headers=headers
+    )
+    independent = client.post(
+        "/admin/feature-flags/wallet_validation_v2/disable",
+        headers={"X-Idempotency-Key": "proposal-flag-456"},
+    )
+    telemetry = client.get("/telemetry").json()
+
+    assert replay.json() == first.json()
+    assert independent.status_code == 200
+    assert [change["value"] for change in telemetry["configuration_changes"]] == [
+        True,
+        False,
+        False,
+    ]
+
+
+def test_idempotency_key_cannot_be_reused_for_a_different_mutation() -> None:
+    client = TestClient(app)
+    headers = {"X-Idempotency-Key": "proposal-conflict"}
+    client.post("/admin/releases/faulty-v2/activate", headers=headers)
+
+    conflict = client.post("/admin/releases/stable-v1/activate", headers=headers)
+    telemetry = client.get("/telemetry").json()
+
+    assert conflict.status_code == 409
+    assert "different mutation" in conflict.json()["detail"]
+    assert telemetry["current_release"]["name"] == "faulty-v2"
+    assert len(telemetry["deployments"]) == 2

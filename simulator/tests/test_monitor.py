@@ -1,6 +1,8 @@
 from typing import Any
 
-from app.monitor import build_alert, should_alert
+import httpx
+
+from app.monitor import AlertMonitor, build_alert, should_alert
 
 
 def telemetry_snapshot(error_rate: float = 0.2, request_count: int = 40) -> dict[str, Any]:
@@ -45,3 +47,27 @@ def test_alert_metric_and_fingerprint_follow_the_active_scenario() -> None:
     assert alert["fingerprint"] == (
         "checkout-api:upstream_timeout_rate:payment-provider-timeout"
     )
+
+
+def test_monitor_authenticates_alert_delivery_with_machine_credential() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/telemetry":
+            return httpx.Response(200, json=telemetry_snapshot())
+        return httpx.Response(201, json={"incident": {"id": "incident-1"}})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        outcome = AlertMonitor(
+            client=client,
+            checkout_api_url="http://checkout.test",
+            pageragent_api_url="http://pageragent.test",
+            ingest_api_key="tenant-bound-secret",
+            threshold=0.05,
+            minimum_requests=20,
+            window_seconds=300,
+        ).evaluate_once()
+
+    assert outcome == "alert-delivered"
+    assert requests[-1].headers["X-PagerAgent-Ingest-Key"] == "tenant-bound-secret"

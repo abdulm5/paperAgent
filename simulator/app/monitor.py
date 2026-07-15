@@ -56,6 +56,7 @@ class AlertMonitor:
         client: httpx.Client,
         checkout_api_url: str,
         pageragent_api_url: str,
+        ingest_api_key: str,
         threshold: float,
         minimum_requests: int,
         window_seconds: int,
@@ -63,6 +64,7 @@ class AlertMonitor:
         self.client = client
         self.checkout_api_url = checkout_api_url.rstrip("/")
         self.pageragent_api_url = pageragent_api_url.rstrip("/")
+        self.ingest_api_key = ingest_api_key
         self.threshold = threshold
         self.minimum_requests = minimum_requests
         self.window_seconds = window_seconds
@@ -84,7 +86,11 @@ class AlertMonitor:
         if alert["fingerprint"] == self.active_fingerprint:
             return "already-alerting"
 
-        alert_response = self.client.post(f"{self.pageragent_api_url}/api/v1/alerts", json=alert)
+        alert_response = self.client.post(
+            f"{self.pageragent_api_url}/api/v1/alerts",
+            json=alert,
+            headers={"X-PagerAgent-Ingest-Key": self.ingest_api_key},
+        )
         alert_response.raise_for_status()
         self.active_fingerprint = alert["fingerprint"]
         print(json.dumps({"event": "alert.delivered", **alert_response.json()}, indent=2))
@@ -95,6 +101,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate checkout telemetry and emit alerts.")
     parser.add_argument("--checkout-api-url", default="http://localhost:8100")
     parser.add_argument("--pageragent-api-url", default="http://localhost:8000")
+    parser.add_argument(
+        "--ingest-api-key",
+        default="pageragent-local-ingest-key",
+        help="Tenant-bound machine credential used to deliver monitoring alerts.",
+    )
     parser.add_argument("--threshold", type=float, default=0.05)
     parser.add_argument("--minimum-requests", type=int, default=20)
     parser.add_argument("--window-seconds", type=int, default=300)
@@ -107,6 +118,7 @@ def main() -> None:
             client=client,
             checkout_api_url=args.checkout_api_url,
             pageragent_api_url=args.pageragent_api_url,
+            ingest_api_key=args.ingest_api_key,
             threshold=args.threshold,
             minimum_requests=args.minimum_requests,
             window_seconds=args.window_seconds,

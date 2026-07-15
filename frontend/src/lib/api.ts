@@ -338,25 +338,289 @@ export interface EvaluationScorecard {
   scenarios: ScenarioEvaluationResult[];
 }
 
+export type WorkflowStatus =
+  | "queued"
+  | "running"
+  | "retry_scheduled"
+  | "completed"
+  | "dead_lettered";
+
+export interface WorkflowDelivery {
+  id: string;
+  workflow_job_id: string;
+  topic: string;
+  payload: Record<string, unknown>;
+  dispatch_attempt: number;
+  available_at: string;
+  published_at: string | null;
+  publish_attempts: number;
+  stream_message_id: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowJob {
+  id: string;
+  workflow_run_id: string;
+  step_type: string;
+  status: WorkflowStatus;
+  payload: Record<string, unknown>;
+  result: Record<string, unknown>;
+  idempotency_key: string;
+  attempt_count: number;
+  max_attempts: number;
+  available_at: string;
+  lease_owner: string | null;
+  lease_expires_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  deliveries: WorkflowDelivery[];
+}
+
+export interface WorkflowRunEvent {
+  id: number;
+  workflow_run_id: string;
+  workflow_job_id: string | null;
+  sequence: number;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface WorkflowRun {
+  id: string;
+  incident_id: string;
+  workflow_type: string;
+  status: WorkflowStatus;
+  current_step: string | null;
+  dedupe_key: string;
+  trace_id: string | null;
+  version: number;
+  failure_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  jobs: WorkflowJob[];
+  events: WorkflowRunEvent[];
+}
+
+export interface WorkflowStreamEvent {
+  id: number;
+  workflow_id: string;
+  incident_id: string;
+  sequence: number;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+  workflow: WorkflowRun;
+}
+
+export type WorkflowStreamStatus =
+  | "connecting"
+  | "live"
+  | "reconnecting"
+  | "unsupported";
+
+export type Permission =
+  | "incidents.read"
+  | "incidents.transition"
+  | "incidents.resolve"
+  | "investigations.run"
+  | "proposals.generate"
+  | "mitigations.decide"
+  | "postmortems.generate"
+  | "postmortems.edit"
+  | "postmortems.finalize"
+  | "evaluations.run"
+  | "organization.reset";
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  display_name: string;
+}
+
+export interface OrganizationSummary {
+  id: string;
+  slug: string;
+  name: string;
+}
+
+export interface OrganizationMembership {
+  organization: OrganizationSummary;
+  role: string;
+}
+
+export interface ActiveOrganization extends OrganizationSummary {
+  role: string;
+}
+
+export interface AuthSession {
+  user: AuthUser;
+  active_organization: ActiveOrganization;
+  memberships: OrganizationMembership[];
+  permissions: Permission[];
+  csrf_token: string;
+}
+
+export interface DevPersona {
+  slug: string;
+  email: string;
+  display_name: string;
+  role: string;
+}
+
+interface AuthSessionEnvelope {
+  session: AuthSession;
+  access_token: string;
+}
+
 export class ApiError extends Error {
   status: number;
+  code: string | null;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code: string | null = null) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+let csrfToken: string | null = null;
+let unauthorizedHandler: (() => void) | null = null;
+let forbiddenHandler: ((error: ApiError) => void) | null = null;
+
+const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+export function setSessionCsrfToken(token: string | null): void {
+  csrfToken = token;
+}
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
+
+export function setForbiddenHandler(handler: ((error: ApiError) => void) | null): void {
+  forbiddenHandler = handler;
+}
+
+interface ErrorEnvelope {
+  code?: unknown;
+  detail?: unknown;
+  message?: unknown;
+}
+
+function parseApiError(body: ErrorEnvelope | null, status: number): ApiError {
+  const detail = body?.detail;
+  const nested = typeof detail === "object" && detail !== null
+    ? detail as ErrorEnvelope
+    : null;
+  const codeCandidate = nested?.code ?? body?.code;
+  const detailString = typeof detail === "string" ? detail : null;
+  const code = typeof codeCandidate === "string"
+    ? codeCandidate
+    : detailString === "membership_inactive"
+      ? detailString
+      : null;
+  const messageCandidate = nested?.message ?? nested?.detail ?? body?.message;
+  const message = typeof messageCandidate === "string"
+    ? messageCandidate
+    : detailString && detailString !== code
+      ? detailString
+      : code === "membership_inactive"
+        ? "Your organization membership is no longer active."
+        : `Request failed with status ${status}`;
+  return new ApiError(message, status, code);
+}
+
+export function hasPermission(
+  session: Pick<AuthSession, "permissions">,
+  permission: Permission,
+): boolean {
+  return session.permissions.includes(permission);
+}
+
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  notifyUnauthorized = true,
+): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  const headers = new Headers(init?.headers);
+  if (init?.body !== undefined && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (MUTATING_METHODS.has(method) && csrfToken !== null) {
+    headers.set("X-CSRF-Token", csrfToken);
+  }
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...init?.headers },
     ...init,
+    credentials: "include",
+    headers,
   });
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new ApiError(body?.detail ?? `Request failed with status ${response.status}`, response.status);
+    const body = (await response.json().catch(() => null)) as ErrorEnvelope | null;
+    const error = parseApiError(body, response.status);
+    if (notifyUnauthorized) {
+      if (response.status === 401 || error.code === "membership_inactive") {
+        unauthorizedHandler?.();
+      } else if (response.status === 403) {
+        forbiddenHandler?.(error);
+      }
+    }
+    throw error;
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
+}
+
+export async function getAuthSession(): Promise<AuthSession> {
+  const session = await request<AuthSession>("/api/v1/auth/session");
+  setSessionCsrfToken(session.csrf_token);
+  return session;
+}
+
+export async function getDevPersonas(): Promise<DevPersona[]> {
+  const response = await request<{ personas: DevPersona[] }>(
+    "/api/v1/auth/dev/personas",
+    undefined,
+    false,
+  );
+  return response.personas;
+}
+
+export async function createDevSession(
+  persona: string,
+  organizationSlug = "pageragent-labs",
+): Promise<AuthSession> {
+  const response = await request<AuthSessionEnvelope>(
+    "/api/v1/auth/dev/session",
+    {
+      method: "POST",
+      body: JSON.stringify({ persona, organization_slug: organizationSlug }),
+    },
+    false,
+  );
+  setSessionCsrfToken(response.session.csrf_token);
+  return response.session;
+}
+
+export async function switchOrganization(organizationId: string): Promise<AuthSession> {
+  const session = await request<AuthSession>("/api/v1/auth/session/switch", {
+    method: "POST",
+    body: JSON.stringify({ organization_id: organizationId }),
+  });
+  setSessionCsrfToken(session.csrf_token);
+  return session;
+}
+
+export async function deleteAuthSession(): Promise<void> {
+  await request<void>("/api/v1/auth/session", { method: "DELETE" });
+  setSessionCsrfToken(null);
 }
 
 export function getIncidents(): Promise<IncidentSummary[]> {
@@ -371,6 +635,10 @@ export function getIncident(incidentId: string): Promise<IncidentDetail> {
   return request<IncidentDetail>(`/api/v1/incidents/${incidentId}`);
 }
 
+export function getIncidentWorkflows(incidentId: string): Promise<WorkflowRun[]> {
+  return request<WorkflowRun[]>(`/api/v1/incidents/${incidentId}/workflows`);
+}
+
 export function transitionIncident(
   incidentId: string,
   toStatus: IncidentStatus,
@@ -382,7 +650,6 @@ export function transitionIncident(
     body: JSON.stringify({
       to_status: toStatus,
       expected_version: expectedVersion,
-      actor: "demo-operator",
       note: note || null,
     }),
   });
@@ -435,7 +702,6 @@ export function decideProposal(
     method: "POST",
     body: JSON.stringify({
       decision,
-      actor: "demo-operator",
       note: note || null,
     }),
   });
@@ -467,7 +733,6 @@ export function updatePostmortem(
     body: JSON.stringify({
       ...edit,
       expected_version: postmortem.version,
-      actor: "demo-incident-commander",
     }),
   });
 }
@@ -480,7 +745,6 @@ export function finalizePostmortem(
     method: "POST",
     body: JSON.stringify({
       expected_version: postmortem.version,
-      actor: "demo-incident-commander",
       note: note || null,
     }),
   });

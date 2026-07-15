@@ -60,6 +60,9 @@ test("shows the grounded case file and saves an auditable revision", async () =>
   const onSave = vi.fn<(edit: PostmortemEditPayload) => Promise<void>>(async () => undefined);
   const props = {
     acting: false,
+    canEdit: true,
+    canFinalize: true,
+    canGenerate: true,
     error: null,
     incidentStatus: "resolved" as const,
     loading: false,
@@ -103,6 +106,9 @@ test("requires explicit review before finalizing the record", async () => {
   render(
     <PostmortemPanel
       acting={false}
+      canEdit={true}
+      canFinalize={true}
+      canGenerate={true}
       error={null}
       incidentStatus="resolved"
       loading={false}

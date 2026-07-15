@@ -10,8 +10,12 @@ import type {
 } from "../lib/api";
 import { postmortemExportUrl } from "../lib/api";
 import { formatTimestamp, titleCase } from "../lib/format";
+import { AuthorityNote } from "./AuthorityNote";
 
 interface PostmortemPanelProps {
+  canEdit: boolean;
+  canFinalize: boolean;
+  canGenerate: boolean;
   postmortem: PostmortemDetail | null;
   incidentStatus: IncidentStatus;
   loading: boolean;
@@ -90,6 +94,9 @@ function PreventionCard({ item }: { item: PreventionItem }) {
 }
 
 export function PostmortemPanel({
+  canEdit,
+  canFinalize,
+  canGenerate,
   postmortem,
   incidentStatus,
   loading,
@@ -124,10 +131,17 @@ export function PostmortemPanel({
           <h2 id="postmortem-title">The incident is closed. Capture what changed.</h2>
           <p>Generate a cited, blameless draft from the preserved response record.</p>
         </div>
-        <button disabled={acting} onClick={() => void onGenerate()} type="button">
-          {acting ? "Generating case file…" : "Generate postmortem"}
-        </button>
-        {error ? <p className="postmortem-error">{error}</p> : null}
+        <div className="guarded-action">
+          <button disabled={acting || !canGenerate} onClick={() => void onGenerate()} type="button">
+            {acting ? "Generating case file…" : "Generate postmortem"}
+          </button>
+          <AuthorityNote
+            allowed={canGenerate}
+            message="This role cannot create a postmortem from the incident record."
+            permission="postmortems.generate"
+          />
+        </div>
+        {error ? <p className="postmortem-error" role="alert">{error}</p> : null}
       </section>
     );
   }
@@ -155,12 +169,12 @@ export function PostmortemPanel({
   }
 
   async function save() {
-    if (!edit || !edit.change_note.trim()) return;
+    if (!canEdit || !edit || !edit.change_note.trim()) return;
     await onSave(edit);
   }
 
   async function finalize() {
-    if (!reviewed) return;
+    if (!canFinalize || !reviewed) return;
     await onFinalize(finalNote);
     setFinalNote("");
   }
@@ -177,13 +191,21 @@ export function PostmortemPanel({
             {postmortem.status === "final" ? "Final record" : "Working draft"}
           </span>
           {isDraft && !editing ? (
-            <button disabled={acting} onClick={() => setEditing(true)} type="button">
+            <button disabled={acting || !canEdit} onClick={() => setEditing(true)} type="button">
               Edit draft
             </button>
           ) : null}
           <a href={postmortemExportUrl(postmortem.id)}>Export Markdown</a>
         </div>
       </div>
+
+      {isDraft && !editing ? (
+        <AuthorityNote
+          allowed={canEdit}
+          message="The draft is readable, but your signed role cannot revise it."
+          permission="postmortems.edit"
+        />
+      ) : null}
 
       <div className="postmortem-casefile">
         <aside className="revision-spine" aria-label="Document revisions">
@@ -291,7 +313,7 @@ export function PostmortemPanel({
               </label>
               <div className="editor-actions">
                 <button
-                  disabled={acting || !edit.change_note.trim()}
+                  disabled={acting || !canEdit || !edit.change_note.trim()}
                   onClick={() => void save()}
                   type="button"
                 >
@@ -374,7 +396,7 @@ export function PostmortemPanel({
             <strong>Finalize only after team review.</strong>
           </div>
           <label className="review-check">
-            <input checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} type="checkbox" />
+            <input checked={reviewed} disabled={!canFinalize} onChange={(event) => setReviewed(event.target.checked)} type="checkbox" />
             I reviewed the report, citations, and prevention owners.
           </label>
           <input
@@ -383,13 +405,18 @@ export function PostmortemPanel({
             placeholder="Optional finalization note"
             value={finalNote}
           />
-          <button disabled={!reviewed || acting} onClick={() => void finalize()} type="button">
+          <button disabled={!reviewed || acting || !canFinalize} onClick={() => void finalize()} type="button">
             {acting ? "Finalizing…" : "Finalize record"}
           </button>
+          <AuthorityNote
+            allowed={canFinalize}
+            message="Final records require a role with document-control authority."
+            permission="postmortems.finalize"
+          />
         </div>
       ) : null}
 
-      {error ? <p className="postmortem-error">{error}</p> : null}
+      {error ? <p className="postmortem-error" role="alert">{error}</p> : null}
     </section>
   );
 }

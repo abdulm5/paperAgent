@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.auth.constants import DEFAULT_ORGANIZATION_ID
 from app.core.config import settings
 from app.db.models import (
     CauseCandidateRecord,
@@ -35,6 +36,11 @@ from app.investigation.commits import CommitRanker, FixtureGitProvider, GitProvi
 from app.investigation.runbooks import RunbookRetriever
 from app.investigation.text import canonical_hash
 from app.services.incidents import IncidentNotFoundError
+from app.workflows.fencing import (
+    WorkflowFence,
+    WorkflowLeaseLostError,
+    commit_with_fence,
+)
 
 
 class InvestigationNotFoundError(Exception):
@@ -55,8 +61,11 @@ class InvestigationService:
         commit_ranker: CommitRanker,
         cause_ranker: CauseRanker,
         runbook_retriever: RunbookRetriever,
+        *,
+        organization_id: UUID = DEFAULT_ORGANIZATION_ID,
     ) -> None:
         self.session = session
+        self.organization_id = organization_id
         self.collector = collector
         self.git_provider = git_provider
         self.clusterer = clusterer
@@ -64,7 +73,13 @@ class InvestigationService:
         self.cause_ranker = cause_ranker
         self.runbook_retriever = runbook_retriever
 
-    def run(self, incident_id: UUID) -> InvestigationDetail:
+    def run(
+        self,
+        incident_id: UUID,
+        *,
+        workflow_job_id: UUID | None = None,
+        fence: WorkflowFence | None = None,
+    ) -> InvestigationDetail:
         incident = self._load_incident(incident_id)
         if not incident.alerts:
             raise InvestigationExecutionError("Incident has no source alert")
@@ -80,17 +95,45 @@ class InvestigationService:
                 "git_provider": self.git_provider.version,
             }
         )
-        run = InvestigationRunRecord(
-            incident_id=incident.id,
-            status=InvestigationStatus.RUNNING.value,
-            collector_version=self.collector.version,
-            clusterer_version=self.clusterer.version,
-            ranker_version=f"{self.commit_ranker.version}+{self.cause_ranker.version}",
-            retrieval_version=self.runbook_retriever.version,
-            input_hash=preflight_hash,
-        )
-        self.session.add(run)
-        self.session.commit()
+        run = None
+        if workflow_job_id is not None:
+            run = self.session.scalar(
+                select(InvestigationRunRecord)
+                .join(IncidentRecord)
+                .where(
+                    InvestigationRunRecord.workflow_job_id == workflow_job_id,
+                    InvestigationRunRecord.incident_id == incident.id,
+                    IncidentRecord.organization_id == self.organization_id,
+                )
+            )
+            if run is not None and run.status == InvestigationStatus.COMPLETED.value:
+                return self.get(run.id)
+
+        if run is None:
+            run = InvestigationRunRecord(
+                incident_id=incident.id,
+                workflow_job_id=workflow_job_id,
+                status=InvestigationStatus.RUNNING.value,
+                collector_version=self.collector.version,
+                clusterer_version=self.clusterer.version,
+                ranker_version=f"{self.commit_ranker.version}+{self.cause_ranker.version}",
+                retrieval_version=self.runbook_retriever.version,
+                input_hash=preflight_hash,
+            )
+            self.session.add(run)
+        else:
+            # A process can die after the RUNNING checkpoint was committed but before
+            # its evidence transaction completed. Delivery retries reuse that same
+            # logical run instead of creating duplicate evidence and timeline events.
+            run.status = InvestigationStatus.RUNNING.value
+            run.collector_version = self.collector.version
+            run.clusterer_version = self.clusterer.version
+            run.ranker_version = f"{self.commit_ranker.version}+{self.cause_ranker.version}"
+            run.retrieval_version = self.runbook_retriever.version
+            run.input_hash = preflight_hash
+            run.failure_reason = None
+            run.completed_at = None
+        commit_with_fence(self.session, fence)
 
         try:
             telemetry = self.collector.collect(str(alert.telemetry_url))
@@ -111,8 +154,7 @@ class InvestigationService:
             )
             support_artifacts: list[EvidenceArtifactRecord] = []
             if any(
-                event.get("upstream_dependency")
-                for event in telemetry.get("recent_events", [])
+                event.get("upstream_dependency") for event in telemetry.get("recent_events", [])
             ):
                 support_artifacts.append(
                     self._add_artifact(
@@ -130,9 +172,7 @@ class InvestigationService:
                         source_uri=f"{str(alert.telemetry_url)}#configuration-changes",
                         payload={
                             "feature_flags": telemetry.get("feature_flags", {}),
-                            "configuration_changes": telemetry.get(
-                                "configuration_changes", []
-                            ),
+                            "configuration_changes": telemetry.get("configuration_changes", []),
                         },
                     )
                 )
@@ -161,9 +201,7 @@ class InvestigationService:
             deployed_at = self._parse_datetime(
                 current_release.get("deployed_at") or alert.release.deployed_at
             )
-            active_commit_sha = str(
-                current_release.get("commit_sha") or alert.release.commit_sha
-            )
+            active_commit_sha = str(current_release.get("commit_sha") or alert.release.commit_sha)
             commits = self.git_provider.list_recent_commits(deployed_at)
             commit_catalog = self._add_artifact(
                 run.id,
@@ -307,31 +345,48 @@ class InvestigationService:
                             "reference": top_cause.reference,
                             "score": top_cause.score,
                         },
-                        "top_runbook": (
-                            top_runbook.document.runbook_id if top_runbook else None
-                        ),
+                        "top_runbook": (top_runbook.document.runbook_id if top_runbook else None),
                         "error_cluster_count": len(cluster_records),
                     },
                 )
             )
-            self.session.commit()
+            commit_with_fence(self.session, fence)
             return self.get(run.id)
+        except WorkflowLeaseLostError:
+            self.session.rollback()
+            raise
         except Exception as error:
             self.session.rollback()
-            failed_run = self.session.get(InvestigationRunRecord, run.id)
+            failed_run = self.session.scalar(
+                select(InvestigationRunRecord)
+                .join(IncidentRecord)
+                .where(
+                    InvestigationRunRecord.id == run.id,
+                    IncidentRecord.organization_id == self.organization_id,
+                )
+            )
             if failed_run is not None:
                 failed_run.status = InvestigationStatus.FAILED.value
                 failed_run.failure_reason = str(error)[:2_000]
                 failed_run.completed_at = datetime.now(UTC)
-                self.session.commit()
+                commit_with_fence(self.session, fence)
             raise InvestigationExecutionError(str(error)) from error
 
     def get_latest(self, incident_id: UUID) -> InvestigationDetail:
-        if self.session.get(IncidentRecord, incident_id) is None:
+        if self.session.scalar(
+            select(IncidentRecord.id).where(
+                IncidentRecord.id == incident_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
+        ) is None:
             raise IncidentNotFoundError
         run = self.session.scalar(
             select(InvestigationRunRecord)
-            .where(InvestigationRunRecord.incident_id == incident_id)
+            .join(IncidentRecord)
+            .where(
+                InvestigationRunRecord.incident_id == incident_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
             .order_by(InvestigationRunRecord.started_at.desc())
             .limit(1)
         )
@@ -342,7 +397,9 @@ class InvestigationService:
     def get(self, investigation_id: UUID) -> InvestigationDetail:
         run = self.session.scalar(
             select(InvestigationRunRecord)
+            .join(IncidentRecord)
             .where(InvestigationRunRecord.id == investigation_id)
+            .where(IncidentRecord.organization_id == self.organization_id)
             .options(
                 selectinload(InvestigationRunRecord.evidence),
                 selectinload(InvestigationRunRecord.error_clusters),
@@ -358,7 +415,10 @@ class InvestigationService:
     def _load_incident(self, incident_id: UUID) -> IncidentRecord:
         incident = self.session.scalar(
             select(IncidentRecord)
-            .where(IncidentRecord.id == incident_id)
+            .where(
+                IncidentRecord.id == incident_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
             .options(selectinload(IncidentRecord.alerts))
         )
         if incident is None:
@@ -492,8 +552,7 @@ class InvestigationService:
                     total_score=item.total_score,
                     score_breakdown=item.score_breakdown,
                     matched_sections=[
-                        RunbookSection.model_validate(section)
-                        for section in item.matched_sections
+                        RunbookSection.model_validate(section) for section in item.matched_sections
                     ],
                     content_hash=item.content_hash,
                     evidence_ids=item.evidence_ids,
@@ -503,13 +562,21 @@ class InvestigationService:
         )
 
 
-def build_investigation_service(session: Session) -> InvestigationService:
+def build_investigation_service(
+    session: Session,
+    organization_id: UUID = DEFAULT_ORGANIZATION_ID,
+) -> InvestigationService:
     return InvestigationService(
         session=session,
-        collector=HttpTelemetryCollector(settings.investigation_http_timeout_seconds),
+        collector=HttpTelemetryCollector(
+            settings.investigation_http_timeout_seconds,
+            allowed_origins=settings.investigation_telemetry_allowed_origins,
+            allow_private_networks=settings.environment.lower() in {"local", "test"},
+        ),
         git_provider=FixtureGitProvider(settings.commit_fixture_path),
         clusterer=ErrorClusterer(),
         commit_ranker=CommitRanker(),
         cause_ranker=CauseRanker(),
         runbook_retriever=RunbookRetriever(settings.runbook_directory),
+        organization_id=organization_id,
     )

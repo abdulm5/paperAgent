@@ -41,6 +41,7 @@ export function IncidentQueue({
       <div className="queue-list">
         {incidents.map((incident) => (
           <button
+            aria-current={selectedId === incident.id ? "true" : undefined}
             className={`queue-item${selectedId === incident.id ? " selected" : ""}`}
             key={incident.id}
             onClick={() => onSelect(incident.id)}

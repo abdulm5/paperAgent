@@ -18,7 +18,7 @@ from app.models import (
     ScenarioStateResponse,
     TelemetrySnapshot,
 )
-from app.state import checkout_state
+from app.state import IdempotencyConflictError, checkout_state
 
 logger = logging.getLogger("checkout.telemetry")
 logger.setLevel(logging.INFO)
@@ -86,8 +86,14 @@ def create_checkout(
 
 
 @app.post("/admin/releases/{release}/activate", response_model=DeploymentEvent)
-def activate_release(release: ReleaseName) -> DeploymentEvent:
-    event = checkout_state.deploy(release)
+def activate_release(
+    release: ReleaseName,
+    x_idempotency_key: str | None = Header(default=None),
+) -> DeploymentEvent:
+    try:
+        event = checkout_state.deploy(release, x_idempotency_key)
+    except IdempotencyConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     emit_structured_log("deployment.activated", event.model_dump(mode="json"))
     return event
 
@@ -100,11 +106,16 @@ def activate_scenario(scenario: ScenarioName) -> ScenarioStateResponse:
 
 
 @app.post("/admin/feature-flags/{name}/disable", response_model=FeatureFlagResponse)
-def disable_feature_flag(name: str) -> FeatureFlagResponse:
+def disable_feature_flag(
+    name: str,
+    x_idempotency_key: str | None = Header(default=None),
+) -> FeatureFlagResponse:
     try:
-        response = checkout_state.disable_feature_flag(name)
+        response = checkout_state.disable_feature_flag(name, x_idempotency_key)
     except KeyError as error:
         raise HTTPException(status_code=404, detail=f"Unknown feature flag: {name}") from error
+    except IdempotencyConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     emit_structured_log("feature_flag.disabled", response.model_dump(mode="json"))
     return response
 

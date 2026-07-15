@@ -89,11 +89,16 @@ class AlertIngestResponse(BaseModel):
     deduplicated: bool
 
 
-class IncidentTransitionRequest(BaseModel):
+class IncidentTransitionInput(BaseModel):
     to_status: IncidentStatus
-    actor: str = Field(min_length=1, max_length=100)
     note: str | None = Field(default=None, max_length=2_000)
     expected_version: int = Field(gt=0)
+
+
+class IncidentTransitionRequest(IncidentTransitionInput):
+    """Trusted service command with a server-derived audit actor."""
+
+    actor: str = Field(min_length=1, max_length=100)
 
 
 class ResetResponse(BaseModel):

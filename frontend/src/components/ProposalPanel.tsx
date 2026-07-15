@@ -7,8 +7,11 @@ import type {
   ProposalDecision,
 } from "../lib/api";
 import { formatTimestamp, titleCase } from "../lib/format";
+import { AuthorityNote } from "./AuthorityNote";
 
 interface ProposalPanelProps {
+  canDecide: boolean;
+  canGenerate: boolean;
   proposal: MitigationProposal | null;
   incidentStatus: IncidentStatus;
   loading: boolean;
@@ -46,6 +49,8 @@ function telemetryState(payload: Record<string, unknown>, featureFlag: string | 
 }
 
 export function ProposalPanel({
+  canDecide,
+  canGenerate,
   proposal,
   incidentStatus,
   loading,
@@ -69,10 +74,17 @@ export function ProposalPanel({
           <h2 id="proposal-title">No decision packet yet.</h2>
           <p>Convert ranked evidence into a cited brief and an approval-gated action.</p>
         </div>
-        <button disabled={acting} onClick={() => void onGenerate()} type="button">
-          {acting ? "Generating…" : "Generate incident brief"}
-        </button>
-        {error ? <p className="proposal-error">{error}</p> : null}
+        <div className="guarded-action">
+          <button disabled={acting || !canGenerate} onClick={() => void onGenerate()} type="button">
+            {acting ? "Generating…" : "Generate incident brief"}
+          </button>
+          <AuthorityNote
+            allowed={canGenerate}
+            message="This role can read existing decision packets but cannot ask the copilot to create one."
+            permission="proposals.generate"
+          />
+        </div>
+        {error ? <p className="proposal-error" role="alert">{error}</p> : null}
       </section>
     );
   }
@@ -81,7 +93,7 @@ export function ProposalPanel({
   const pending = proposal.status === "pending_approval";
   const advisory = proposal.status === "advisory";
   const verified = proposal.status === "verification_passed" && proposal.execution;
-  const canApprove = incidentStatus === "investigating" && reviewed && !acting;
+  const canApprove = canDecide && incidentStatus === "investigating" && reviewed && !acting;
   const responsePayload = proposal.execution?.response_payload;
   const canaryCount = responsePayload?.canary_request_count;
   const failureCount = responsePayload?.recovery_failure_count;
@@ -89,6 +101,7 @@ export function ProposalPanel({
   const actionLabel = isFlagChange ? "feature flag change" : "rollback";
 
   async function decide(decision: ProposalDecision) {
+    if (!canDecide) return;
     await onDecision(decision, note);
     setNote("");
     setReviewed(false);
@@ -182,12 +195,18 @@ export function ProposalPanel({
         {pending ? (
           <div className="approval-console">
             <p className="brief-label">Operator decision</p>
+            <AuthorityNote
+              allowed={canDecide}
+              message="Review remains available, but this signed role cannot approve or reject mitigation."
+              permission="mitigations.decide"
+            />
             {incidentStatus !== "investigating" ? (
               <p className="approval-warning">Begin the investigation before approval is unlocked.</p>
             ) : null}
             <label className="review-check">
               <input
                 checked={reviewed}
+                disabled={!canDecide}
                 onChange={(event) => setReviewed(event.target.checked)}
                 type="checkbox"
               />
@@ -212,7 +231,7 @@ export function ProposalPanel({
               </button>
               <button
                 className="reject-button"
-                disabled={acting}
+                disabled={acting || !canDecide}
                 onClick={() => void decide("reject")}
                 type="button"
               >
@@ -261,7 +280,7 @@ export function ProposalPanel({
         ) : null}
       </div>
 
-      {error ? <p className="proposal-error">{error}</p> : null}
+      {error ? <p className="proposal-error" role="alert">{error}</p> : null}
     </section>
   );
 }

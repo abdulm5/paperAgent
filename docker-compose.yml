@@ -17,6 +17,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    command: redis-server --appendonly yes
     ports:
       - "6379:6379"
     healthcheck:
@@ -42,7 +43,9 @@ services:
       AUTO_INVESTIGATE_INCIDENTS: "true"
       AUTO_GENERATE_PROPOSALS: "true"
       AUTO_GENERATE_POSTMORTEMS: "true"
+      DURABLE_MITIGATION_ENABLED: "true"
       CHECKOUT_CONTROL_URL: http://checkout-api:8100
+      PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS: http://checkout-api:8100
     ports:
       - "8000:8000"
     healthcheck:
@@ -56,6 +59,51 @@ services:
       - ./scenarios:/scenarios:ro
     depends_on:
       postgres:
+        condition: service_healthy
+      checkout-api:
+        condition: service_healthy
+
+  outbox-relay:
+    build:
+      context: ./backend
+      target: development
+    command: python -m app.workflows.worker relay
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SERVICE_NAME: pageragent-outbox-relay
+      DATABASE_URL: postgresql+psycopg://pageragent:pageragent@postgres:5432/pageragent
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  workflow-worker:
+    build:
+      context: ./backend
+      target: development
+    command: python -m app.workflows.worker work
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SERVICE_NAME: pageragent-workflow-worker
+      DATABASE_URL: postgresql+psycopg://pageragent:pageragent@postgres:5432/pageragent
+      REDIS_URL: redis://redis:6379/0
+      RUNBOOK_DIRECTORY: /runbooks
+      COMMIT_FIXTURE_PATH: /scenarios/checkout-commits.json
+      SCENARIO_DIRECTORY: /scenarios
+      CHECKOUT_CONTROL_URL: http://checkout-api:8100
+      PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS: http://checkout-api:8100
+    volumes:
+      - ./backend:/app
+      - ./runbooks:/runbooks:ro
+      - ./scenarios:/scenarios:ro
+    depends_on:
+      backend:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -89,6 +137,8 @@ services:
       - http://checkout-api:8100
       - --pageragent-api-url
       - http://backend:8000
+      - --ingest-api-key
+      - "${PAGERAGENT_INGEST_API_KEY:-pageragent-local-ingest-key}"
       - --threshold
       - "${ALERT_ERROR_RATE_THRESHOLD:-0.05}"
       - --minimum-requests

@@ -1,7 +1,9 @@
 import type { InvestigationDetail } from "../lib/api";
 import { formatTimestamp, titleCase } from "../lib/format";
+import { AuthorityNote } from "./AuthorityNote";
 
 interface InvestigationPanelProps {
+  canRun: boolean;
   investigation: InvestigationDetail | null;
   loading: boolean;
   running: boolean;
@@ -14,6 +16,7 @@ function citation(value: string): string {
 }
 
 export function InvestigationPanel({
+  canRun,
   investigation,
   loading,
   running,
@@ -35,10 +38,17 @@ export function InvestigationPanel({
             runbook.
           </p>
         </div>
-        <button disabled={running} onClick={() => void onRun()} type="button">
-          {running ? "Collecting evidence…" : "Run investigation"}
-        </button>
-        {error ? <p className="investigation-error">{error}</p> : null}
+        <div className="guarded-action">
+          <button disabled={running || !canRun} onClick={() => void onRun()} type="button">
+            {running ? "Collecting evidence…" : "Run investigation"}
+          </button>
+          <AuthorityNote
+            allowed={canRun}
+            message="This role may inspect evidence but cannot start an investigation job."
+            permission="investigations.run"
+          />
+        </div>
+        {error ? <p className="investigation-error" role="alert">{error}</p> : null}
       </section>
     );
   }
@@ -61,11 +71,17 @@ export function InvestigationPanel({
           <time dateTime={investigation.completed_at ?? investigation.started_at}>
             {formatTimestamp(investigation.completed_at ?? investigation.started_at)}
           </time>
-          <button disabled={running} onClick={() => void onRun()} type="button">
+          <button disabled={running || !canRun} onClick={() => void onRun()} type="button">
             {running ? "Running…" : "Rerun"}
           </button>
         </div>
       </div>
+
+      <AuthorityNote
+        allowed={canRun}
+        message="The preserved investigation remains readable; rerunning evidence collection is not granted."
+        permission="investigations.run"
+      />
 
       {primaryCluster ? (
         <div className="cluster-strip">
@@ -202,7 +218,7 @@ export function InvestigationPanel({
           ))}
         </div>
       </details>
-      {error ? <p className="investigation-error">{error}</p> : null}
+      {error ? <p className="investigation-error" role="alert">{error}</p> : null}
     </section>
   );
 }

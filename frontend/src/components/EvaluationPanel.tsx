@@ -1,7 +1,9 @@
 import type { EvaluationScorecard } from "../lib/api";
 import { formatTimestamp, titleCase } from "../lib/format";
+import { AuthorityNote } from "./AuthorityNote";
 
 interface EvaluationPanelProps {
+  canRun: boolean;
   scorecard: EvaluationScorecard | null;
   loading: boolean;
   error: string | null;
@@ -13,6 +15,7 @@ function percent(value: number): string {
 }
 
 export function EvaluationPanel({
+  canRun,
   scorecard,
   loading,
   error,
@@ -28,11 +31,22 @@ export function EvaluationPanel({
         <div className="evaluation-verdict">
           <span>{scorecard?.passed ? "All gates passing" : loading ? "Calibrating" : "Attention"}</span>
           <strong>{scorecard ? `${scorecard.scenario_count}/${scorecard.scenario_count}` : "—/—"}</strong>
-          <button disabled={loading} onClick={() => void onRefresh()} type="button">
+          <button
+            disabled={loading || !canRun}
+            onClick={() => void onRefresh()}
+            title={canRun ? undefined : "Requires evaluations.run"}
+            type="button"
+          >
             {loading ? "Running…" : "Run suite"}
           </button>
         </div>
       </header>
+
+      <AuthorityNote
+        allowed={canRun}
+        message="You can inspect the latest scorecard, but only a calibration operator can run it again."
+        permission="evaluations.run"
+      />
 
       {scorecard ? (
         <>
@@ -85,9 +99,13 @@ export function EvaluationPanel({
           </footer>
         </>
       ) : (
-        <p className="evaluation-message">{error ?? "Loading deterministic regression suite…"}</p>
+        <p className="evaluation-message" role={error ? "alert" : undefined}>
+          {error ?? (canRun
+            ? "Loading deterministic regression suite…"
+            : "The scorecard is not executed for this signed role.")}
+        </p>
       )}
-      {error && scorecard ? <p className="evaluation-error">{error}</p> : null}
+      {error && scorecard ? <p className="evaluation-error" role="alert">{error}</p> : null}
     </section>
   );
 }

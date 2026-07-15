@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.auth.constants import DEFAULT_ORGANIZATION_ID
 from app.copilot.postmortems import (
     DeterministicPostmortemGenerator,
     OpenAIPostmortemGenerator,
@@ -38,6 +39,7 @@ from app.investigation.text import canonical_hash
 from app.services.incidents import IncidentNotFoundError
 from app.services.investigations import InvestigationService
 from app.services.proposals import ProposalService
+from app.workflows.fencing import WorkflowFence, commit_with_fence
 
 
 class PostmortemNotFoundError(Exception):
@@ -64,12 +66,20 @@ class PostmortemService:
         session: Session,
         generator: PostmortemGenerator,
         validator: PostmortemGroundingValidator,
+        *,
+        organization_id: UUID = DEFAULT_ORGANIZATION_ID,
     ) -> None:
         self.session = session
+        self.organization_id = organization_id
         self.generator = generator
         self.validator = validator
 
-    def generate(self, incident_id: UUID) -> PostmortemDetail:
+    def generate(
+        self,
+        incident_id: UUID,
+        *,
+        fence: WorkflowFence | None = None,
+    ) -> PostmortemDetail:
         incident = self._load_incident(incident_id)
         if incident.status != IncidentStatus.RESOLVED.value:
             raise PostmortemGenerationError(
@@ -89,11 +99,7 @@ class PostmortemService:
         if proposal is None or proposal.execution is None:
             raise PostmortemGenerationError("Verified mitigation evidence is required")
         investigation = next(
-            (
-                item
-                for item in incident.investigations
-                if item.id == proposal.investigation_id
-            ),
+            (item for item in incident.investigations if item.id == proposal.investigation_id),
             None,
         )
         if investigation is None:
@@ -121,9 +127,7 @@ class PostmortemService:
             **narrative.model_dump(),
             timeline=timeline,
         )
-        prompt_version = str(
-            getattr(self.generator, "prompt_version", "blameless-postmortem-v1")
-        )
+        prompt_version = str(getattr(self.generator, "prompt_version", "blameless-postmortem-v1"))
         input_hash = canonical_hash(
             {
                 "context": context,
@@ -167,14 +171,24 @@ class PostmortemService:
                 },
             )
         )
-        self.session.commit()
+        commit_with_fence(self.session, fence)
         return self.get(record.id)
 
     def get_for_incident(self, incident_id: UUID) -> PostmortemDetail:
-        if self.session.get(IncidentRecord, incident_id) is None:
+        if self.session.scalar(
+            select(IncidentRecord.id).where(
+                IncidentRecord.id == incident_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
+        ) is None:
             raise IncidentNotFoundError
         record = self.session.scalar(
-            select(PostmortemRecord).where(PostmortemRecord.incident_id == incident_id)
+            select(PostmortemRecord)
+            .join(IncidentRecord)
+            .where(
+                PostmortemRecord.incident_id == incident_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
         )
         if record is None:
             raise PostmortemNotFoundError
@@ -183,7 +197,9 @@ class PostmortemService:
     def get(self, postmortem_id: UUID) -> PostmortemDetail:
         record = self.session.scalar(
             select(PostmortemRecord)
+            .join(IncidentRecord)
             .where(PostmortemRecord.id == postmortem_id)
+            .where(IncidentRecord.organization_id == self.organization_id)
             .options(selectinload(PostmortemRecord.revisions))
             .execution_options(populate_existing=True)
         )
@@ -191,9 +207,7 @@ class PostmortemService:
             raise PostmortemNotFoundError
         return self._to_detail(record)
 
-    def update(
-        self, postmortem_id: UUID, request: PostmortemUpdateRequest
-    ) -> PostmortemDetail:
+    def update(self, postmortem_id: UUID, request: PostmortemUpdateRequest) -> PostmortemDetail:
         record = self._load_for_update(postmortem_id)
         if record.status != PostmortemStatus.DRAFT.value:
             raise PostmortemConflictError("Finalized postmortems cannot be edited")
@@ -276,9 +290,7 @@ class PostmortemService:
         self.session.commit()
         return self.get(record.id)
 
-    def finalize(
-        self, postmortem_id: UUID, request: PostmortemFinalizeRequest
-    ) -> PostmortemDetail:
+    def finalize(self, postmortem_id: UUID, request: PostmortemFinalizeRequest) -> PostmortemDetail:
         record = self._load_for_update(postmortem_id)
         if record.status != PostmortemStatus.DRAFT.value:
             raise PostmortemConflictError("Postmortem is already finalized")
@@ -363,13 +375,11 @@ class PostmortemService:
             )
         lines.extend(["", "## What went well", ""])
         lines.extend(
-            f"- {item.text} {citations(item.evidence_ids)}"
-            for item in content.what_went_well
+            f"- {item.text} {citations(item.evidence_ids)}" for item in content.what_went_well
         )
         lines.extend(["", "## What went poorly", ""])
         lines.extend(
-            f"- {item.text} {citations(item.evidence_ids)}"
-            for item in content.what_went_poorly
+            f"- {item.text} {citations(item.evidence_ids)}" for item in content.what_went_poorly
         )
         lines.extend(
             [
@@ -406,7 +416,10 @@ class PostmortemService:
     def _load_incident(self, incident_id: UUID) -> IncidentRecord:
         record = self.session.scalar(
             select(IncidentRecord)
-            .where(IncidentRecord.id == incident_id)
+            .where(
+                IncidentRecord.id == incident_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
             .options(
                 selectinload(IncidentRecord.alerts),
                 selectinload(IncidentRecord.events),
@@ -442,7 +455,9 @@ class PostmortemService:
     def _load_for_update(self, postmortem_id: UUID) -> PostmortemRecord:
         record = self.session.scalar(
             select(PostmortemRecord)
+            .join(IncidentRecord)
             .where(PostmortemRecord.id == postmortem_id)
+            .where(IncidentRecord.organization_id == self.organization_id)
             .options(selectinload(PostmortemRecord.revisions))
             .with_for_update()
             .execution_options(populate_existing=True)
@@ -474,20 +489,16 @@ class PostmortemService:
             "investigation": {
                 "id": str(investigation_detail.id),
                 "error_clusters": [
-                    item.model_dump(mode="json")
-                    for item in investigation_detail.error_clusters
+                    item.model_dump(mode="json") for item in investigation_detail.error_clusters
                 ],
                 "cause_candidates": [
-                    item.model_dump(mode="json")
-                    for item in investigation_detail.cause_candidates
+                    item.model_dump(mode="json") for item in investigation_detail.cause_candidates
                 ],
                 "commit_candidates": [
-                    item.model_dump(mode="json")
-                    for item in investigation_detail.commit_candidates
+                    item.model_dump(mode="json") for item in investigation_detail.commit_candidates
                 ],
                 "runbook_matches": [
-                    item.model_dump(mode="json")
-                    for item in investigation_detail.runbook_matches
+                    item.model_dump(mode="json") for item in investigation_detail.runbook_matches
                 ],
                 "evidence_manifest": [
                     {
@@ -586,7 +597,10 @@ class PostmortemService:
         )
 
 
-def build_postmortem_service(session: Session) -> PostmortemService:
+def build_postmortem_service(
+    session: Session,
+    organization_id: UUID = DEFAULT_ORGANIZATION_ID,
+) -> PostmortemService:
     api_key_value = (
         settings.openai_api_key.get_secret_value().strip()
         if settings.openai_api_key is not None
@@ -610,4 +624,5 @@ def build_postmortem_service(session: Session) -> PostmortemService:
         session=session,
         generator=generator,
         validator=PostmortemGroundingValidator(),
+        organization_id=organization_id,
     )

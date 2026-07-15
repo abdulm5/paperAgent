@@ -68,9 +68,8 @@ class EditablePreventionItem(BaseModel):
     status: str = Field(min_length=1, max_length=50)
 
 
-class PostmortemUpdateRequest(BaseModel):
+class PostmortemUpdateInput(BaseModel):
     expected_version: int = Field(gt=0)
-    actor: str = Field(min_length=1, max_length=100)
     change_note: str = Field(min_length=1, max_length=500)
     title: str = Field(min_length=1, max_length=300)
     summary: str = Field(min_length=1, max_length=5_000)
@@ -83,10 +82,21 @@ class PostmortemUpdateRequest(BaseModel):
     prevention_items: list[EditablePreventionItem] = Field(min_length=1, max_length=12)
 
 
-class PostmortemFinalizeRequest(BaseModel):
-    expected_version: int = Field(gt=0)
+class PostmortemUpdateRequest(PostmortemUpdateInput):
+    """Trusted service command with a server-derived audit actor."""
+
     actor: str = Field(min_length=1, max_length=100)
+
+
+class PostmortemFinalizeInput(BaseModel):
+    expected_version: int = Field(gt=0)
     note: str | None = Field(default=None, max_length=500)
+
+
+class PostmortemFinalizeRequest(PostmortemFinalizeInput):
+    """Trusted service command with a server-derived audit actor."""
+
+    actor: str = Field(min_length=1, max_length=100)
 
 
 class PostmortemRevisionDetail(BaseModel):

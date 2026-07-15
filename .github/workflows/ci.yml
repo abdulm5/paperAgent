@@ -16,11 +16,63 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
-      - run: alembic upgrade head
+      - name: Verify migration upgrade, rollback, and recovery
+        run: |
+          alembic upgrade head
+          alembic downgrade -1
+          alembic upgrade head
         env:
           DATABASE_URL: sqlite+pysqlite:///./ci.db
-      - run: ruff check app tests
-      - run: pytest
+      - name: Lint backend
+        run: ruff check app tests
+      - name: Validate demo shells
+        run: bash -n ../scripts/run-demo.sh ../scripts/run-durability-demo.sh
+      - name: Run durable workflow reliability tests
+        run: pytest tests/test_workflows.py
+      - name: Run remaining backend tests
+        run: pytest --ignore=tests/test_workflows.py
+
+  workflow-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: pageragent
+          POSTGRES_USER: pageragent
+          POSTGRES_PASSWORD: pageragent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pageragent -d pageragent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DATABASE_URL: postgresql+psycopg://pageragent:pageragent@localhost:5432/pageragent
+      REDIS_URL: redis://localhost:6379/15
+      PAGERAGENT_INTEGRATION_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - run: alembic upgrade head
+      - name: Exercise PostgreSQL relay contention and Redis recovery
+        run: pytest -q tests/integration/test_workflow_runtime.py
 
   simulator:
     runs-on: ubuntu-latest

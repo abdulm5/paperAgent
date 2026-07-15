@@ -1,8 +1,12 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from opentelemetry.trace import SpanKind
 
 from app.api.router import api_router
 from app.core.config import settings
+from app.core.telemetry import configure_telemetry, current_trace_id, tracer
+
+configure_telemetry()
 
 app = FastAPI(
     title="PagerAgent API",
@@ -17,5 +21,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def trace_http_request(request: Request, call_next):
+    with tracer().start_as_current_span(
+        f"{request.method} {request.url.path}",
+        kind=SpanKind.SERVER,
+        attributes={
+            "http.request.method": request.method,
+            "url.path": request.url.path,
+        },
+    ) as span:
+        response = await call_next(request)
+        span.set_attribute("http.response.status_code", response.status_code)
+        trace_id = current_trace_id()
+        if trace_id is not None:
+            response.headers["X-Trace-ID"] = trace_id
+        return response
 
 app.include_router(api_router, prefix="/api/v1")

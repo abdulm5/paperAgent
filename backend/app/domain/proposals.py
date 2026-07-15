@@ -68,10 +68,15 @@ class ActionEnvelope(BaseModel):
         return self
 
 
-class ProposalDecisionRequest(BaseModel):
+class ProposalDecisionInput(BaseModel):
     decision: ProposalDecision
-    actor: str = Field(min_length=1, max_length=100)
     note: str | None = Field(default=None, max_length=2_000)
+
+
+class ProposalDecisionRequest(ProposalDecisionInput):
+    """Trusted service command with a server-derived audit actor."""
+
+    actor: str = Field(min_length=1, max_length=100)
 
 
 class ProposalDecisionDetail(BaseModel):

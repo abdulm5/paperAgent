@@ -1,22 +1,27 @@
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.routes.proposals import get_proposal_service
 from app.copilot.citations import CitationValidator
 from app.copilot.execution import ExecutionResult, SimulatorMitigationExecutor
 from app.copilot.synthesis import DeterministicBriefSynthesizer, OpenAIBriefSynthesizer
+from app.core.config import settings
+from app.db.models import MitigationExecutionRecord, WorkflowJobRecord, WorkflowRunRecord
 from app.domain.incidents import IncidentStatus, IncidentTransitionRequest
 from app.domain.proposals import ActionEnvelope, ProposalDecisionRequest
 from app.evaluation.proposals import evaluate_proposal
 from app.main import app
 from app.services.incidents import IncidentService
 from app.services.proposals import ProposalGenerationError, ProposalService
+from app.workflows.engine import ExecutionDisposition, WorkflowEngine
 from tests.test_investigations import alert_payload, build_service
 
 
@@ -45,11 +50,22 @@ class RecordingExecutor:
         )
 
 
+class FlakyRecordingExecutor(RecordingExecutor):
+    def execute(self, action: object, idempotency_key: str) -> ExecutionResult:
+        self.calls.append((action, idempotency_key))
+        if len(self.calls) == 1:
+            raise TimeoutError("worker lost its receipt after mutation")
+        return ExecutionResult(
+            response_payload={"deployment": {"release": "stable-v1"}},
+            before_telemetry={"current_release": {"name": "faulty-v2"}},
+            after_telemetry={"current_release": {"name": "stable-v1"}},
+            recovery_verified=True,
+        )
+
+
 def incident_with_investigation(db_session: Session) -> tuple[UUID, object]:
     client = TestClient(app)
-    incident_id = UUID(
-        client.post("/api/v1/alerts", json=alert_payload()).json()["incident"]["id"]
-    )
+    incident_id = UUID(client.post("/api/v1/alerts", json=alert_payload()).json()["incident"]["id"])
     investigation = build_service(db_session).run(incident_id)
     return incident_id, investigation
 
@@ -164,9 +180,73 @@ def test_approved_rollback_verifies_recovery_and_mitigates_incident(
     assert incident.version == 3
     assert evaluate_proposal(approved, allowed_ids).passed
     assert "proposal.approved" in [event.event_type for event in incident.events]
-    assert "mitigation.recovery_verified" in [
-        event.event_type for event in incident.events
-    ]
+    assert "mitigation.recovery_verified" in [event.event_type for event in incident.events]
+
+
+def test_durable_mitigation_retries_with_one_execution_and_one_side_effect_key(
+    db_session: Session, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "durable_mitigation_enabled", True)
+    incident_id, _ = incident_with_investigation(db_session)
+    executor = FlakyRecordingExecutor()
+    service = proposal_service(db_session, executor)
+    proposal = service.generate(incident_id)
+    IncidentService(db_session).transition(
+        incident_id,
+        IncidentTransitionRequest(
+            to_status=IncidentStatus.INVESTIGATING,
+            actor="oncall@example.com",
+            expected_version=1,
+        ),
+    )
+
+    approved = service.decide(
+        proposal.id,
+        ProposalDecisionRequest(decision="approve", actor="oncall@example.com"),
+    )
+    job_id = db_session.scalar(
+        select(WorkflowJobRecord.id).where(WorkflowJobRecord.step_type == "execute_mitigation")
+    )
+    assert approved.status == "approved"
+    assert approved.execution is None
+    assert job_id is not None
+
+    factory = sessionmaker(bind=db_session.get_bind(), autoflush=False, expire_on_commit=False)
+
+    def execute_mitigation(session: Session, job: WorkflowJobRecord, fence) -> dict[str, object]:
+        detail = proposal_service(session, executor).execute_approved(
+            UUID(str(job.payload["proposal_id"])),
+            fence=fence,
+        )
+        return {"proposal_id": str(detail.id), "status": detail.status.value}
+
+    current_time = datetime.now(UTC) + timedelta(seconds=1)
+    engine = WorkflowEngine(
+        factory,
+        worker_id="mitigation-worker",
+        handlers={"execute_mitigation": execute_mitigation},
+        clock=lambda: current_time,
+        retry_base_seconds=2,
+    )
+    first = engine.execute(job_id)
+    assert first.disposition is ExecutionDisposition.RETRY_SCHEDULED
+
+    with factory() as session:
+        retry_job = session.get(WorkflowJobRecord, job_id)
+        assert retry_job is not None
+        current_time = retry_job.available_at
+    second = engine.execute(job_id)
+
+    assert second.disposition is ExecutionDisposition.COMPLETED
+    assert len(executor.calls) == 2
+    assert executor.calls[0][1] == executor.calls[1][1]
+    with factory() as session:
+        workflow = session.scalar(select(WorkflowRunRecord))
+        incident = IncidentService(session).get_detail(incident_id)
+        assert workflow is not None
+        assert workflow.status == "completed"
+        assert incident.status == IncidentStatus.MITIGATED
+        assert session.scalar(select(func.count()).select_from(MitigationExecutionRecord)) == 1
 
 
 def test_approval_requires_incident_investigating(db_session: Session) -> None:
@@ -222,9 +302,7 @@ class InvalidCitationSynthesizer(DeterministicBriefSynthesizer):
 
 def test_uncited_model_output_is_rejected(db_session: Session) -> None:
     incident_id, _ = incident_with_investigation(db_session)
-    service = proposal_service(
-        db_session, RecordingExecutor(), InvalidCitationSynthesizer()
-    )
+    service = proposal_service(db_session, RecordingExecutor(), InvalidCitationSynthesizer())
 
     with pytest.raises(ProposalGenerationError, match="unknown evidence"):
         service.generate(incident_id)
@@ -264,9 +342,7 @@ def test_openai_adapter_uses_responses_structured_output() -> None:
                 "output": [
                     {
                         "type": "message",
-                        "content": [
-                            {"type": "output_text", "text": draft.model_dump_json()}
-                        ],
+                        "content": [{"type": "output_text", "text": draft.model_dump_json()}],
                     }
                 ]
             },
@@ -304,9 +380,7 @@ def test_simulator_executor_rolls_back_and_verifies_canary_cohort() -> None:
             return httpx.Response(
                 200,
                 json={
-                    "current_release": {
-                        "name": "stable-v1" if deployed else "faulty-v2"
-                    },
+                    "current_release": {"name": "stable-v1" if deployed else "faulty-v2"},
                     "recent_events": events,
                 },
             )
@@ -334,23 +408,17 @@ def test_simulator_executor_rolls_back_and_verifies_canary_cohort() -> None:
             return httpx.Response(201, json={"status": "accepted"})
         return httpx.Response(404)
 
-    client = httpx.Client(
-        base_url="http://checkout.test", transport=httpx.MockTransport(handler)
-    )
+    client = httpx.Client(base_url="http://checkout.test", transport=httpx.MockTransport(handler))
     executor = SimulatorMitigationExecutor(
         base_url="http://checkout.test", canary_requests=15, client=client
     )
 
-    result = executor.execute(
-        ActionEnvelope(expected_faulty_commit="8fa23c1"), "proposal-test-id"
-    )
+    result = executor.execute(ActionEnvelope(expected_faulty_commit="8fa23c1"), "proposal-test-id")
 
     assert result.recovery_verified
     assert result.response_payload["canary_request_count"] == 15
     assert result.response_payload["recovery_failure_count"] == 0
-    assert sum(
-        payload["payment_method"] == "digital_wallet" for payload in canary_payloads
-    ) == 5
+    assert sum(payload["payment_method"] == "digital_wallet" for payload in canary_payloads) == 5
 
 
 def test_proposal_api_generates_and_returns_latest(db_session: Session) -> None:

@@ -3,7 +3,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import get_current_principal, require_permission
 from app.db.session import get_db
+from app.domain.auth import Permission, Principal
 from app.domain.investigations import InvestigationDetail
 from app.services.incidents import IncidentNotFoundError
 from app.services.investigations import (
@@ -16,13 +18,19 @@ from app.services.investigations import (
 router = APIRouter(prefix="/incidents/{incident_id}/investigations", tags=["investigations"])
 
 
-def get_investigation_service(session: Session = Depends(get_db)) -> InvestigationService:
-    return build_investigation_service(session)
+def get_investigation_service(
+    session: Session = Depends(get_db),
+    principal: Principal = Depends(get_current_principal),
+) -> InvestigationService:
+    return build_investigation_service(session, principal.organization_id)
 
 
 @router.post("", response_model=InvestigationDetail, status_code=status.HTTP_201_CREATED)
 def run_investigation(
     incident_id: UUID,
+    _principal: Principal = Depends(
+        require_permission(Permission.INVESTIGATIONS_RUN)
+    ),
     service: InvestigationService = Depends(get_investigation_service),
 ) -> InvestigationDetail:
     try:
@@ -36,6 +44,9 @@ def run_investigation(
 @router.get("/latest", response_model=InvestigationDetail)
 def get_latest_investigation(
     incident_id: UUID,
+    _principal: Principal = Depends(
+        require_permission(Permission.INCIDENTS_READ)
+    ),
     service: InvestigationService = Depends(get_investigation_service),
 ) -> InvestigationDetail:
     try:

@@ -1,10 +1,12 @@
 from datetime import UTC, datetime
+from secrets import token_hex
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.auth.constants import DEFAULT_ORGANIZATION_ID
 from app.copilot.actions import derive_action, required_runbook
 from app.copilot.citations import CitationValidator
 from app.copilot.execution import MitigationExecutor, SimulatorMitigationExecutor
@@ -14,6 +16,7 @@ from app.copilot.synthesis import (
     OpenAIBriefSynthesizer,
 )
 from app.core.config import settings
+from app.core.telemetry import current_trace_id
 from app.db.models import (
     IncidentEventRecord,
     IncidentRecord,
@@ -34,9 +37,16 @@ from app.domain.proposals import (
     ProposalDecisionRequest,
     ProposalStatus,
 )
+from app.domain.workflows import WorkflowType
 from app.investigation.text import canonical_hash
 from app.services.incidents import IncidentNotFoundError
 from app.services.investigations import InvestigationService
+from app.workflows.fencing import (
+    WorkflowFence,
+    WorkflowLeaseLostError,
+    commit_with_fence,
+)
+from app.workflows.store import WorkflowStore
 
 
 class ProposalNotFoundError(Exception):
@@ -55,6 +65,10 @@ class ApprovalPolicyError(Exception):
     pass
 
 
+class MitigationExecutionError(Exception):
+    pass
+
+
 class ProposalService:
     def __init__(
         self,
@@ -62,24 +76,47 @@ class ProposalService:
         synthesizer: BriefSynthesizer,
         citation_validator: CitationValidator,
         executor: MitigationExecutor,
+        *,
+        organization_id: UUID = DEFAULT_ORGANIZATION_ID,
     ) -> None:
         self.session = session
+        self.organization_id = organization_id
         self.synthesizer = synthesizer
         self.citation_validator = citation_validator
         self.executor = executor
 
     def generate(
-        self, incident_id: UUID, investigation_id: UUID | None = None
+        self,
+        incident_id: UUID,
+        investigation_id: UUID | None = None,
+        *,
+        workflow_job_id: UUID | None = None,
+        fence: WorkflowFence | None = None,
     ) -> MitigationProposalDetail:
         incident = self._load_incident(incident_id)
         investigation = self._load_investigation(incident_id, investigation_id)
         if investigation.status != InvestigationStatus.COMPLETED.value:
             raise ProposalGenerationError("A completed investigation is required")
 
+        if workflow_job_id is not None:
+            workflow_proposal = self.session.scalar(
+                select(MitigationProposalRecord)
+                .join(IncidentRecord)
+                .where(
+                    MitigationProposalRecord.workflow_job_id == workflow_job_id,
+                    MitigationProposalRecord.incident_id == incident.id,
+                    IncidentRecord.organization_id == self.organization_id,
+                )
+            )
+            if workflow_proposal is not None:
+                return self.get(workflow_proposal.id)
+
         existing = self.session.scalar(
             select(MitigationProposalRecord)
+            .join(IncidentRecord)
             .where(
                 MitigationProposalRecord.investigation_id == investigation.id,
+                IncidentRecord.organization_id == self.organization_id,
                 MitigationProposalRecord.status.in_(
                     [
                         ProposalStatus.PENDING_APPROVAL.value,
@@ -94,11 +131,7 @@ class ProposalService:
             return self.get(existing.id)
 
         detail = InvestigationService._to_detail(investigation)
-        if (
-            not detail.error_clusters
-            or not detail.cause_candidates
-            or not detail.runbook_matches
-        ):
+        if not detail.error_clusters or not detail.cause_candidates or not detail.runbook_matches:
             raise ProposalGenerationError("Investigation is missing ranked evidence")
         context = self._synthesis_context(incident, detail)
         try:
@@ -130,6 +163,7 @@ class ProposalService:
         proposal = MitigationProposalRecord(
             incident_id=incident.id,
             investigation_id=investigation.id,
+            workflow_job_id=workflow_job_id,
             status=(
                 ProposalStatus.PENDING_APPROVAL.value
                 if action.automation_allowed
@@ -176,15 +210,24 @@ class ProposalService:
                 },
             )
         )
-        self.session.commit()
+        commit_with_fence(self.session, fence)
         return self.get(proposal.id)
 
     def get_latest(self, incident_id: UUID) -> MitigationProposalDetail:
-        if self.session.get(IncidentRecord, incident_id) is None:
+        if self.session.scalar(
+            select(IncidentRecord.id).where(
+                IncidentRecord.id == incident_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
+        ) is None:
             raise IncidentNotFoundError
         proposal = self.session.scalar(
             select(MitigationProposalRecord)
-            .where(MitigationProposalRecord.incident_id == incident_id)
+            .join(IncidentRecord)
+            .where(
+                MitigationProposalRecord.incident_id == incident_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
             .order_by(MitigationProposalRecord.created_at.desc())
             .limit(1)
         )
@@ -195,7 +238,9 @@ class ProposalService:
     def get(self, proposal_id: UUID) -> MitigationProposalDetail:
         proposal = self.session.scalar(
             select(MitigationProposalRecord)
+            .join(IncidentRecord)
             .where(MitigationProposalRecord.id == proposal_id)
+            .where(IncidentRecord.organization_id == self.organization_id)
             .options(
                 selectinload(MitigationProposalRecord.decisions),
                 selectinload(MitigationProposalRecord.execution),
@@ -211,7 +256,9 @@ class ProposalService:
     ) -> MitigationProposalDetail:
         proposal = self.session.scalar(
             select(MitigationProposalRecord)
+            .join(IncidentRecord)
             .where(MitigationProposalRecord.id == proposal_id)
+            .where(IncidentRecord.organization_id == self.organization_id)
             .options(selectinload(MitigationProposalRecord.decisions))
             .with_for_update()
         )
@@ -222,7 +269,10 @@ class ProposalService:
 
         incident = self.session.scalar(
             select(IncidentRecord)
-            .where(IncidentRecord.id == proposal.incident_id)
+            .where(
+                IncidentRecord.id == proposal.incident_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
             .with_for_update()
         )
         if incident is None:
@@ -266,37 +316,95 @@ class ProposalService:
                 payload={"proposal_id": str(proposal.id)},
             )
         )
+        durable_execution = (
+            request.decision is ProposalDecision.APPROVE and settings.durable_mitigation_enabled
+        )
+        if durable_execution:
+            WorkflowStore(self.session, self.organization_id).enqueue(
+                incident.id,
+                WorkflowType.MITIGATION,
+                "execute_mitigation",
+                f"proposal:{proposal.id}:mitigation",
+                max_attempts=settings.workflow_max_attempts,
+                payload={"proposal_id": str(proposal.id)},
+                trace_id=current_trace_id() or token_hex(16),
+            )
         self.session.commit()
         if request.decision is ProposalDecision.REJECT:
             return self.get(proposal.id)
+        if durable_execution:
+            return self.get(proposal.id)
         return self._execute(proposal.id)
 
-    def _execute(self, proposal_id: UUID) -> MitigationProposalDetail:
-        proposal = self.session.get(MitigationProposalRecord, proposal_id)
+    def execute_approved(
+        self,
+        proposal_id: UUID,
+        *,
+        fence: WorkflowFence | None = None,
+    ) -> MitigationProposalDetail:
+        """Execute or resume an approved mitigation for a durable workflow job."""
+        detail = self._execute(proposal_id, retry_failed=True, fence=fence)
+        if detail.status is ProposalStatus.EXECUTION_FAILED:
+            raise MitigationExecutionError(
+                detail.failure_reason or "Mitigation recovery verification failed"
+            )
+        return detail
+
+    def _execute(
+        self,
+        proposal_id: UUID,
+        *,
+        retry_failed: bool = False,
+        fence: WorkflowFence | None = None,
+    ) -> MitigationProposalDetail:
+        proposal = self.session.scalar(
+            select(MitigationProposalRecord)
+            .join(IncidentRecord)
+            .where(
+                MitigationProposalRecord.id == proposal_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
+        )
         if proposal is None:
             raise ProposalNotFoundError
-        if proposal.status != ProposalStatus.APPROVED.value:
+        if proposal.status not in {
+            ProposalStatus.APPROVED.value,
+            ProposalStatus.EXECUTING.value,
+            ProposalStatus.EXECUTION_FAILED.value,
+        }:
             raise ApprovalPolicyError("Only an approved proposal can execute")
-        if proposal.execution is not None:
+        execution = proposal.execution
+        if execution is not None and execution.status == "completed":
+            return self.get(proposal.id)
+        if execution is not None and execution.status == "failed" and not retry_failed:
             return self.get(proposal.id)
 
         action = self._action(proposal)
         self._enforce_action_policy(action)
         idempotency_key = f"proposal-{proposal.id}"
         proposal.status = ProposalStatus.EXECUTING.value
-        execution = MitigationExecutionRecord(
-            proposal_id=proposal.id,
-            status="running",
-            executor_version=self.executor.version,
-            idempotency_key=idempotency_key,
-            request_payload=action.model_dump(mode="json"),
-            response_payload={},
-            before_telemetry={},
-            after_telemetry={},
-            recovery_verified=False,
-        )
-        self.session.add(execution)
-        self.session.commit()
+        proposal.failure_reason = None
+        if execution is None:
+            execution = MitigationExecutionRecord(
+                proposal_id=proposal.id,
+                status="running",
+                executor_version=self.executor.version,
+                idempotency_key=idempotency_key,
+                request_payload=action.model_dump(mode="json"),
+                response_payload={},
+                before_telemetry={},
+                after_telemetry={},
+                recovery_verified=False,
+            )
+            self.session.add(execution)
+        else:
+            # A worker may die before or after the external mutation. Reusing the
+            # persisted key lets the simulator return the original mutation result.
+            execution.status = "running"
+            execution.executor_version = self.executor.version
+            execution.failure_reason = None
+            execution.completed_at = None
+        commit_with_fence(self.session, fence)
 
         try:
             result = self.executor.execute(action, idempotency_key)
@@ -313,12 +421,13 @@ class ProposalService:
                 else ProposalStatus.EXECUTION_FAILED.value
             )
             if not result.recovery_verified:
-                proposal.failure_reason = (
-                    "Mitigation executed, but recovery verification failed"
-                )
+                proposal.failure_reason = "Mitigation executed, but recovery verification failed"
                 execution.failure_reason = proposal.failure_reason
             self._record_execution_outcome(proposal, result.recovery_verified, now)
-            self.session.commit()
+            commit_with_fence(self.session, fence)
+        except WorkflowLeaseLostError:
+            self.session.rollback()
+            raise
         except Exception as error:
             now = datetime.now(UTC)
             execution.status = "failed"
@@ -327,13 +436,18 @@ class ProposalService:
             proposal.status = ProposalStatus.EXECUTION_FAILED.value
             proposal.failure_reason = execution.failure_reason
             self._record_execution_outcome(proposal, False, now)
-            self.session.commit()
+            commit_with_fence(self.session, fence)
         return self.get(proposal.id)
 
     def _record_execution_outcome(
         self, proposal: MitigationProposalRecord, verified: bool, now: datetime
     ) -> None:
-        incident = self.session.get(IncidentRecord, proposal.incident_id)
+        incident = self.session.scalar(
+            select(IncidentRecord).where(
+                IncidentRecord.id == proposal.incident_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
+        )
         if incident is None:
             raise IncidentNotFoundError
         from_status = incident.status
@@ -367,7 +481,10 @@ class ProposalService:
     def _load_incident(self, incident_id: UUID) -> IncidentRecord:
         incident = self.session.scalar(
             select(IncidentRecord)
-            .where(IncidentRecord.id == incident_id)
+            .where(
+                IncidentRecord.id == incident_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
             .options(selectinload(IncidentRecord.alerts))
         )
         if incident is None:
@@ -379,7 +496,11 @@ class ProposalService:
     ) -> InvestigationRunRecord:
         statement = (
             select(InvestigationRunRecord)
-            .where(InvestigationRunRecord.incident_id == incident_id)
+            .join(IncidentRecord)
+            .where(
+                InvestigationRunRecord.incident_id == incident_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
             .options(
                 selectinload(InvestigationRunRecord.evidence),
                 selectinload(InvestigationRunRecord.error_clusters),
@@ -524,7 +645,10 @@ class ProposalService:
         )
 
 
-def build_proposal_service(session: Session) -> ProposalService:
+def build_proposal_service(
+    session: Session,
+    organization_id: UUID = DEFAULT_ORGANIZATION_ID,
+) -> ProposalService:
     provider = settings.synthesis_provider.lower()
     api_key_value = (
         settings.openai_api_key.get_secret_value().strip()
@@ -552,4 +676,5 @@ def build_proposal_service(session: Session) -> ProposalService:
             base_url=settings.checkout_control_url,
             canary_requests=settings.recovery_canary_requests,
         ),
+        organization_id=organization_id,
     )

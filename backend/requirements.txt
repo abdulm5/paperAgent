@@ -3,6 +3,7 @@ fastapi==0.115.12
 httpx==0.28.1
 pydantic-settings==2.8.1
 PyJWT[crypto]==2.13.0
+cryptography==49.0.0
 sqlalchemy==2.0.40
 psycopg[binary]==3.2.6
 pyyaml==6.0.3

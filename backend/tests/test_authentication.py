@@ -205,6 +205,8 @@ def test_production_configuration_rejects_development_identity_defaults() -> Non
     assert "PAGERAGENT_SESSION_SECRET" in message
     assert "PAGERAGENT_INGEST_API_KEY" in message
     assert "PAGERAGENT_OIDC_ISSUER" in message
+    assert "PAGERAGENT_CONNECTOR_MASTER_KEY" in message
+    assert "PAGERAGENT_CONNECTOR_KEY_VERSION" in message
 
 
 def test_production_configuration_accepts_complete_fail_closed_identity_settings() -> None:
@@ -218,6 +220,9 @@ def test_production_configuration_accepts_complete_fail_closed_identity_settings
         PAGERAGENT_OIDC_AUDIENCE="pageragent-api",
         PAGERAGENT_OIDC_JWKS_URL="https://identity.example.com/.well-known/jwks.json",
         PAGERAGENT_INGEST_API_KEY="ingest-key-with-at-least-thirty-two-characters",
+        PAGERAGENT_CONNECTOR_MASTER_KEY="eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=",
+        PAGERAGENT_CONNECTOR_KEY_VERSION="production-v1",
+        PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS="https://connectors.example.com",
         PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS="https://telemetry.example.com",
         backend_cors_origins="https://pageragent.example.com",
     )

@@ -23,6 +23,9 @@ class Permission(StrEnum):
     POSTMORTEMS_FINALIZE = "postmortems.finalize"
     EVALUATIONS_RUN = "evaluations.run"
     ORGANIZATION_RESET = "organization.reset"
+    CONNECTORS_READ = "connectors.read"
+    CONNECTORS_MANAGE = "connectors.manage"
+    CONNECTORS_VALIDATE = "connectors.validate"
 
 
 class Principal(BaseModel):

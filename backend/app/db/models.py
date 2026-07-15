@@ -5,11 +5,13 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     JSON,
     BigInteger,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -40,6 +42,9 @@ class OrganizationRecord(Base):
         passive_deletes=True,
     )
     incidents: Mapped[list["IncidentRecord"]] = relationship(back_populates="organization")
+    connectors: Mapped[list["ConnectorRecord"]] = relationship(
+        back_populates="organization",
+    )
 
 
 class UserRecord(Base):
@@ -84,6 +89,138 @@ class OrganizationMembershipRecord(Base):
 
     organization: Mapped[OrganizationRecord] = relationship(back_populates="memberships")
     user: Mapped[UserRecord] = relationship(back_populates="memberships")
+
+
+class ConnectorRecord(Base):
+    __tablename__ = "connectors"
+    __table_args__ = (
+        Index("ix_connectors_organization_created", "organization_id", "created_at"),
+        UniqueConstraint("organization_id", "name", name="uq_connectors_organization_name"),
+        CheckConstraint(
+            "provider IN ('github', 'prometheus', 'slack')",
+            name="ck_connectors_provider",
+        ),
+        CheckConstraint(
+            "status IN ('configured', 'disabled', 'invalid')",
+            name="ck_connectors_status",
+        ),
+        CheckConstraint("version > 0", name="ck_connectors_version_positive"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    configuration: Mapped[dict[str, Any]] = mapped_column(json_document, nullable=False)
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_validation_ok: Mapped[bool | None] = mapped_column()
+    last_validation_message: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    organization: Mapped[OrganizationRecord] = relationship(back_populates="connectors")
+    credential: Mapped["ConnectorCredentialRecord | None"] = relationship(
+        back_populates="connector",
+        cascade="all, delete-orphan",
+        uselist=False,
+        passive_deletes=True,
+    )
+    events: Mapped[list["ConnectorAuditEventRecord"]] = relationship(
+        back_populates="connector",
+        order_by="(ConnectorAuditEventRecord.created_at, ConnectorAuditEventRecord.id)",
+    )
+
+
+class ConnectorCredentialRecord(Base):
+    __tablename__ = "connector_credentials"
+    __table_args__ = (
+        CheckConstraint(
+            "credential_version > 0",
+            name="ck_connector_credentials_version_positive",
+        ),
+        CheckConstraint(
+            "length(ciphertext_nonce) = 12",
+            name="ck_connector_credentials_ciphertext_nonce_length",
+        ),
+        CheckConstraint(
+            "length(wrapped_key_nonce) = 12",
+            name="ck_connector_credentials_wrapped_key_nonce_length",
+        ),
+        CheckConstraint(
+            "length(ciphertext) >= 16",
+            name="ck_connector_credentials_ciphertext_length",
+        ),
+        CheckConstraint(
+            "length(wrapped_data_key) = 48",
+            name="ck_connector_credentials_wrapped_key_length",
+        ),
+        CheckConstraint(
+            "length(ciphertext) <= 262144",
+            name="ck_connector_credentials_ciphertext_max_length",
+        ),
+    )
+
+    connector_id: Mapped[UUID] = mapped_column(
+        ForeignKey("connectors.id", ondelete="CASCADE"), primary_key=True
+    )
+    credential_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    ciphertext_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    wrapped_data_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    wrapped_key_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    key_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    credential_field_names: Mapped[list[str]] = mapped_column(json_document, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    connector: Mapped[ConnectorRecord] = relationship(back_populates="credential")
+
+
+class ConnectorAuditEventRecord(Base):
+    __tablename__ = "connector_audit_events"
+    __table_args__ = (
+        Index("ix_connector_audit_events_connector_created", "connector_id", "created_at"),
+        Index("ix_connector_audit_events_organization_created", "organization_id", "created_at"),
+        CheckConstraint(
+            "connector_version > 0",
+            name="ck_connector_audit_events_version_positive",
+        ),
+        UniqueConstraint(
+            "connector_id",
+            "connector_version",
+            name="uq_connector_audit_events_connector_version",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    connector_id: Mapped[UUID] = mapped_column(
+        ForeignKey("connectors.id", ondelete="RESTRICT"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor: Mapped[str] = mapped_column(String(100), nullable=False)
+    connector_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(json_document, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    connector: Mapped[ConnectorRecord] = relationship(back_populates="events")
 
 
 class IncidentRecord(Base):

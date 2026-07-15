@@ -1,14 +1,21 @@
 import { afterEach, expect, test, vi } from "vitest";
 
 import {
+  createConnector,
   decideProposal,
   finalizePostmortem,
+  getConnector,
+  getConnectorEvents,
+  getConnectors,
   getIncidents,
+  rotateConnectorCredentials,
   setForbiddenHandler,
   setSessionCsrfToken,
   setUnauthorizedHandler,
   transitionIncident,
   updatePostmortem,
+  updateConnector,
+  validateConnector,
   type PostmortemDetail,
   type PostmortemEditPayload,
 } from "./api";
@@ -18,6 +25,73 @@ afterEach(() => {
   setForbiddenHandler(null);
   setUnauthorizedHandler(null);
   vi.unstubAllGlobals();
+});
+
+test("uses the tenant-scoped connector custody contract and signs every write", async () => {
+  const fetchMock = vi.fn<
+    (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+  >(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+    } as Response));
+  vi.stubGlobal("fetch", fetchMock);
+  setSessionCsrfToken("connector-csrf");
+
+  await getConnectors();
+  await getConnector("connector-1");
+  await getConnectorEvents("connector-1");
+  await createConnector({
+    name: "Production GitHub",
+    provider: "github",
+    configuration: {
+      repository: "pageragent/core",
+      app_id: "42",
+      installation_id: "84",
+    },
+    credentials: { private_key: "sentinel-private-key" },
+  });
+  await updateConnector("connector-1", {
+    expected_version: 4,
+    name: "Primary GitHub",
+    enabled: false,
+  });
+  await rotateConnectorCredentials("connector-1", 5, {
+    private_key: "replacement-private-key",
+  });
+  await validateConnector("connector-1", 6);
+
+  expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+    "/api/v1/connectors",
+    "/api/v1/connectors/connector-1",
+    "/api/v1/connectors/connector-1/events",
+    "/api/v1/connectors",
+    "/api/v1/connectors/connector-1",
+    "/api/v1/connectors/connector-1/credentials",
+    "/api/v1/connectors/connector-1/validate",
+  ]);
+
+  const writeCalls = fetchMock.mock.calls.slice(3);
+  expect(writeCalls.map(([, init]) => init?.method)).toEqual(["POST", "PATCH", "PUT", "POST"]);
+  for (const [, init] of writeCalls) {
+    expect(init?.credentials).toBe("include");
+    expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("connector-csrf");
+  }
+  expect(JSON.parse(String(writeCalls[0][1]?.body))).toEqual({
+    name: "Production GitHub",
+    provider: "github",
+    configuration: {
+      repository: "pageragent/core",
+      app_id: "42",
+      installation_id: "84",
+    },
+    credentials: { private_key: "sentinel-private-key" },
+  });
+  expect(JSON.parse(String(writeCalls[2][1]?.body))).toEqual({
+    expected_version: 5,
+    credentials: { private_key: "replacement-private-key" },
+  });
+  expect(JSON.parse(String(writeCalls[3][1]?.body))).toEqual({ expected_version: 6 });
 });
 
 test("signs every cookie-authenticated write with CSRF and never accepts a client actor", async () => {

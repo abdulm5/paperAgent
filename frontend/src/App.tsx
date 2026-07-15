@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AuthorityReceipt } from "./components/AuthorityReceipt";
+import { ConnectorCustodyPanel } from "./components/ConnectorCustodyPanel";
 import { IncidentDetailPanel } from "./components/IncidentDetailPanel";
 import { IncidentQueue } from "./components/IncidentQueue";
 import { EvaluationPanel } from "./components/EvaluationPanel";
@@ -313,6 +314,7 @@ function IncidentLedger({
   onSwitchOrganization,
   session,
 }: IncidentLedgerProps) {
+  const [surface, setSurface] = useState<"incidents" | "connectors">("incidents");
   const [incidents, setIncidents] = useState<IncidentSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<IncidentDetail | null>(null);
@@ -708,6 +710,31 @@ function IncidentLedger({
         session={session}
       />
 
+      <nav className="surface-switch" aria-label="PagerAgent surfaces">
+        <span>Operational surface</span>
+        <div>
+          <button
+            aria-pressed={surface === "incidents"}
+            onClick={() => setSurface("incidents")}
+            type="button"
+          >
+            Incident ledger
+          </button>
+          <button
+            aria-pressed={surface === "connectors"}
+            onClick={() => setSurface("connectors")}
+            type="button"
+          >
+            Connector custody
+          </button>
+        </div>
+      </nav>
+
+      {surface === "connectors" ? (
+        <ConnectorCustodyPanel session={session} />
+      ) : (
+        <>
+
       <section className="command-header" aria-labelledby="page-title">
         <div>
           <p className="eyebrow">Incident command</p>
@@ -774,6 +801,8 @@ function IncidentLedger({
           transitioning={transitioning}
         />
       </div>
+        </>
+      )}
     </main>
   );
 }

@@ -4,6 +4,8 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
 import type {
   AuthSession,
+  ConnectorDetail,
+  ConnectorEvent,
   EvaluationScorecard,
   IncidentDetail,
   IncidentSummary,
@@ -24,6 +26,7 @@ const allPermissions: AuthSession["permissions"] = [
   "postmortems.finalize",
   "evaluations.run",
   "organization.reset",
+  "connectors.read",
 ];
 
 const authSession: AuthSession = {
@@ -67,6 +70,35 @@ const sandboxSession: AuthSession = {
     role: "incident_commander",
   },
   csrf_token: "csrf-sandbox-token",
+};
+
+const connectorDetail: ConnectorDetail = {
+  id: "11111111-1111-4111-8111-111111111111",
+  name: "Production evidence",
+  provider: "github",
+  status: "configured",
+  enabled: true,
+  configuration: {
+    repository: "pageragent/core",
+    app_id: "42",
+    installation_id: "84",
+  },
+  credential_fields: ["private_key"],
+  credential_version: 2,
+  version: 4,
+  last_validated_at: "2026-07-15T13:10:00Z",
+  last_validation_message: "Credential accepted",
+  created_at: "2026-07-15T13:00:00Z",
+  updated_at: "2026-07-15T13:10:00Z",
+};
+
+const connectorEvent: ConnectorEvent = {
+  id: "22222222-2222-4222-8222-222222222222",
+  event_type: "connector.validated",
+  actor: "user:maya@pageragent.dev",
+  connector_version: 4,
+  payload: { outcome: "configured" },
+  created_at: "2026-07-15T13:10:00Z",
 };
 
 const viewerSession: AuthSession = {
@@ -551,6 +583,13 @@ beforeEach(() => {
         currentSession = sandboxSession;
         return jsonResponse(sandboxSession);
       }
+      if (path.endsWith(`/connectors/${connectorDetail.id}/events`)) {
+        return jsonResponse([connectorEvent]);
+      }
+      if (path.endsWith(`/connectors/${connectorDetail.id}`)) {
+        return jsonResponse(connectorDetail);
+      }
+      if (path.endsWith("/connectors")) return jsonResponse([connectorDetail]);
       if (path.endsWith("/evaluations/scorecard")) return jsonResponse(scorecard);
       if (path.endsWith("/workflows")) return jsonResponse([workflowRun]);
       if (path.endsWith("/investigations/latest")) return jsonResponse(investigation);
@@ -621,6 +660,30 @@ test("renders persisted incident evidence from the API", async () => {
   expect(screen.getByText("All gates passing")).toBeInTheDocument();
   expect(screen.getByText("payment-gateway")).toBeInTheDocument();
   expect(document.querySelector(".queue-item.selected")).toHaveAttribute("aria-current", "true");
+});
+
+test("keeps connector custody separate and loads it only when selected", async () => {
+  render(<App />);
+
+  await screen.findByRole("heading", { name: summary.summary });
+  expect(screen.getByRole("button", { name: "Incident ledger" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes("/connectors"))).toBe(false);
+
+  fireEvent.click(screen.getByRole("button", { name: "Connector custody" }));
+  expect(
+    await screen.findByRole("heading", { name: "Know what crosses the boundary." }),
+  ).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: connectorDetail.name })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: summary.summary })).not.toBeInTheDocument();
+  expect(screen.getByText("Provider input")).toBeInTheDocument();
+  expect(screen.getByText("Sealed vault")).toBeInTheDocument();
+  expect(screen.getByText("Authorized use")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Incident ledger" }));
+  expect(await screen.findByRole("heading", { name: summary.summary })).toBeInTheDocument();
 });
 
 test("shows the durable workflow snapshot when live streaming is unavailable", async () => {
@@ -783,6 +846,13 @@ test("shows exact read-only boundaries for a viewer and removes manual mitigatio
   expect(screen.getAllByText("investigations.run").length).toBeGreaterThan(0);
   expect(screen.getAllByText("mitigations.decide").length).toBeGreaterThan(0);
   expect(screen.queryByRole("button", { name: "Mark mitigated" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Connector custody" }));
+  expect(
+    screen.getByRole("heading", { name: "The vault stays outside your authority." }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("connectors.read")).toBeInTheDocument();
+  expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes("/connectors"))).toBe(false);
 });
 
 test("closes the tenant stream before switching organization scope", async () => {

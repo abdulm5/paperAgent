@@ -19,13 +19,21 @@ _INCIDENT_COMMANDER_PERMISSIONS = _RESPONDER_PERMISSIONS | {
     Permission.MITIGATIONS_DECIDE,
     Permission.POSTMORTEMS_FINALIZE,
     Permission.EVALUATIONS_RUN,
+    Permission.CONNECTORS_READ,
 }
 
 ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
     Role.VIEWER: _VIEWER_PERMISSIONS,
     Role.RESPONDER: frozenset(_RESPONDER_PERMISSIONS),
     Role.INCIDENT_COMMANDER: frozenset(_INCIDENT_COMMANDER_PERMISSIONS),
-    Role.ADMIN: frozenset(_INCIDENT_COMMANDER_PERMISSIONS | {Permission.ORGANIZATION_RESET}),
+    Role.ADMIN: frozenset(
+        _INCIDENT_COMMANDER_PERMISSIONS
+        | {
+            Permission.ORGANIZATION_RESET,
+            Permission.CONNECTORS_MANAGE,
+            Permission.CONNECTORS_VALIDATE,
+        }
+    ),
 }
 
 

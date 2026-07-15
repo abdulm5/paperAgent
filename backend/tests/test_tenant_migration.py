@@ -124,7 +124,7 @@ def test_downgrade_refuses_cross_tenant_active_fingerprint_collision_before_ddl(
     engine = None
     try:
         settings.database_url = database_url
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260714_0007")
         engine = create_engine(database_url)
         metadata = MetaData()
         incidents = Table("incidents", metadata, autoload_with=engine)

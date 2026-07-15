@@ -35,10 +35,10 @@ The LLM is deliberately downstream of evidence gathering. It can summarize, comp
 | Component | Current responsibility | Later responsibility |
 | --- | --- | --- |
 | `simulator/` | Reproduce code, configuration, and upstream-dependency failures | Add production-like distributed services |
-| `backend/` | Authenticate identities, enforce organization membership and RBAC, persist incidents and workflows, relay a transactional outbox, execute database-leased jobs, rank causes, validate grounded briefs, enforce approval policy, verify recovery, and version postmortems | Add production evidence and action adapters |
-| PostgreSQL | Own incident state, workflow runs and jobs, ordered workflow events, leases, retry clocks, results, and unpublished outbox messages | Move to a managed high-availability deployment |
+| `backend/` | Authenticate identities, enforce organization membership and RBAC, custody typed connector credentials, persist incidents and workflows, relay a transactional outbox, execute database-leased jobs, rank causes, validate grounded briefs, enforce approval policy, verify recovery, and version postmortems | Add production evidence and action adapters |
+| PostgreSQL | Own connector metadata, encrypted credential envelopes and custody events alongside incident state, workflows, leases, results, and unpublished outbox messages | Move to a managed high-availability deployment |
 | Redis Streams | Wake workers with at-least-once delivery, consumer groups, pending-message reclaim, and a dead-letter stream | Move to a managed transport and tune retention |
-| `frontend/` | Present the signed organization scope, exact permission receipt, evidence, causal rankings, evaluation gates, workflow delivery receipts, recovery receipts, and postmortem document control | Add connector and membership administration |
+| `frontend/` | Present the signed organization scope, exact permission receipt, connector custody ledger, evidence, causal rankings, evaluation gates, workflow delivery receipts, recovery receipts, and postmortem document control | Add membership administration |
 | `runbooks/` | Supply versioned procedures to hybrid retrieval | Source grounded mitigation steps |
 | `scenarios/` | Define versioned simulation, ground truth, adversarial cases, and thresholds | Grow a reviewed incident corpus |
 | `evals/` | Score cause ranking, retrieval, impact, traceability, action safety, authority, and resilience | Add model-provider comparison and historical trends |
@@ -63,11 +63,21 @@ Local browser sessions use an HTTP-only `SameSite=Strict` cookie. Unsafe cookie-
 requests also require a per-session CSRF header, while local CLI demos use the same signed session
 as a Bearer credential. The production-facing OIDC exchange proves external identity through a
 fixed issuer, audience, JWKS endpoint, and algorithm allow-list before PagerAgent checks locally
-provisioned membership. Provider-specific browser redirect, callback, and PKCE wiring is a Phase 8B
+provisioned membership. Provider-specific browser redirect, callback, and PKCE wiring is a Phase 9E
 integration rather than an implicit claim of the included local dashboard.
 Human audit actors are derived from that principal. Monitoring uses a separate tenant-bound machine
 ingest key; the alert body cannot select its organization. Telemetry collection accepts only
 server-configured origins and applies URL, redirect, DNS, and IP-range policy before fetching.
+
+Connectors use the same organization boundary and add a narrower credential-custody boundary.
+Incident commanders can read non-secret connector state; only administrators can write, validate,
+or enable it. Provider schemas divide ordinary configuration from write-only credential fields.
+Each credential revision is encrypted under a fresh random data-encryption key, and that key is
+wrapped by an exact-version key-encryption key. Authenticated associated data binds the envelope to
+its organization, connector, provider, revision, and key identifier, so copied or edited rows fail
+closed. API responses and allowlisted audit payloads reveal field presence and revision only.
+Validation in Phase 9A checks provider schema and vault integrity without making an external
+request; each production adapter will own its later network and sanitization policy.
 
 PostgreSQL is also the workflow source of truth. A workflow enqueue writes the run, initial job, ordered workflow events, and outbox row in the same transaction as the business transition that caused it. Redis does not decide whether work exists; it transports a job identifier after the transaction commits. Losing Redis therefore delays work but does not erase it. In addition to unpublished rows, the relay periodically checks the exact stream ID on the latest stale receipt for a due nonterminal job; it republishes only when that entry is missing. Publication and repair can both create duplicates, so workers treat duplicate delivery as expected.
 
@@ -205,3 +215,32 @@ permission and ownership predicate. Switching organizations closes the existing 
 clears every incident-derived React state before loading the next scope, so the old tenant cannot
 remain visible under a new label. The workflow stream revalidates membership before each event poll
 and terminates when the signed session expires.
+
+## Phase 9A connector custody path
+
+```text
+admin create or credential rotation
+                │ typed provider contract
+                ├──► non-secret configuration
+                └──► write-only credentials → fresh 256-bit data key
+                                              → AES-GCM ciphertext
+                                              → wrapped key + exact active key ID
+                │
+                ▼
+connector + credential envelope + sanitized event (one PostgreSQL transaction)
+
+admin metadata / enable / validate mutation + expected version
+                │ tenant-scoped row lock
+                ▼
+configuration or status receipt + sanitized event (one PostgreSQL transaction)
+
+both paths ──► metadata/detail API: field names only
+           └─► validation: authenticated envelope, no provider network request
+```
+
+New connectors begin disabled. A successful custody validation records a receipt but does not
+silently enable the connector; the administrator makes that state transition explicitly with the
+latest version. Rotating credentials increments both revisions and returns the connector to the
+disabled state, preventing an unverified credential from inheriting authority. There is no delete
+API: disabling preserves the append-only event trail, and a migration downgrade refuses to discard
+populated custody tables.

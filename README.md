@@ -4,25 +4,28 @@ PagerAgent is an evidence-grounded incident-response copilot. It helps an on-cal
 
 ## Project status
 
-**Phase 8A — identity and tenant boundaries.** PagerAgent now authenticates signed
-browser and CLI sessions, resolves active organization membership and role from PostgreSQL on every
-request, enforces explicit permissions, isolates incident aggregates and workflow SSE by
-organization, derives human audit actors on the server, and authenticates monitoring through a
-separate tenant-bound machine credential.
+**Phase 9A — secure connector control plane.** PagerAgent now gives each organization a typed,
+audited custody boundary for future GitHub, Prometheus, and Slack integrations. Administrators can
+register disabled connectors, rotate write-only credentials protected by per-revision envelope
+encryption, validate local custody, and explicitly enable them. Incident commanders receive
+read-only operational visibility; lower roles and other organizations receive no connector data.
 
 ## The interview story
 
 PagerAgent is designed around a simple principle: the model synthesizes evidence; deterministic tools collect and score it. The complete flow is:
 
 1. A signed user session selects one active organization and receives an exact permission receipt.
-2. A versioned simulator scenario introduces a code, configuration, or dependency failure.
-3. Tenant-authenticated telemetry crosses an alert threshold and atomically creates an incident, durable workflow, first job, workflow events, and outbox message in PostgreSQL.
-4. A separate relay publishes the job to Redis Streams; a database-leased worker gathers evidence, ranks causal signals, and retrieves the matching runbook.
-5. PagerAgent proposes a cited typed action—or blocks automation when the evidence points outside its authority—without losing work if a process restarts.
-6. An authorized human approves or rejects the proposal. Approval atomically queues a separate mitigation workflow instead of performing the external write in the request.
-7. The worker executes the allow-listed action with a proposal-scoped idempotency key and records recovery verification before the incident is mitigated.
-8. Resolution queues a durable postmortem workflow; the resulting cited report can be revised, finalized, and exported.
-9. The tenant-filtered workflow recorder follows every queue, lease, retry, completion, and dead-letter event through a replayable server-sent event stream.
+2. An administrator provisions a disabled provider connector through a typed contract; PagerAgent
+   seals its write-only credential with a per-revision data key and records a sanitized custody
+   event before the connector can be enabled.
+3. A versioned simulator scenario introduces a code, configuration, or dependency failure.
+4. Tenant-authenticated telemetry crosses an alert threshold and atomically creates an incident, durable workflow, first job, workflow events, and outbox message in PostgreSQL.
+5. A separate relay publishes the job to Redis Streams; a database-leased worker gathers evidence, ranks causal signals, and retrieves the matching runbook.
+6. PagerAgent proposes a cited typed action—or blocks automation when the evidence points outside its authority—without losing work if a process restarts.
+7. An authorized human approves or rejects the proposal. Approval atomically queues a separate mitigation workflow instead of performing the external write in the request.
+8. The worker executes the allow-listed action with a proposal-scoped idempotency key and records recovery verification before the incident is mitigated.
+9. Resolution queues a durable postmortem workflow; the resulting cited report can be revised, finalized, and exported.
+10. The tenant-filtered workflow recorder follows every queue, lease, retry, completion, and dead-letter event through a replayable server-sent event stream.
 
 ## Repository layout
 
@@ -59,7 +62,21 @@ exact RBAC boundary. Every persona can switch to an empty sandbox organization t
 and SSE isolation. Outside local/test, PagerAgent disables personas, fails startup on development
 secrets, and exposes a fixed-issuer OIDC token exchange for the same HttpOnly PagerAgent session.
 The provider-specific authorization redirect/callback and PKCE browser bootstrap are intentionally
-not claimed by this phase; that hosted identity-provider adapter is part of Phase 8B.
+not claimed by this phase; that hosted identity-provider adapter is planned for Phase 9E.
+
+To demonstrate the connector custody boundary independently from an incident:
+
+```bash
+./scripts/run-connector-demo.sh
+```
+
+The script creates a disabled Prometheus connector, proves the submitted token is absent from every
+API and audit response, validates the authenticated envelope, enables the connector with an
+optimistic version check, rotates the credential back into a disabled state, and prints the
+sanitized custody history. It validates storage and authorization only—Phase 9A makes no provider
+network request. The incident demo below still uses deterministic simulator telemetry, Git
+fixtures, and local runbooks; Phase 9B and 9C will connect these custody records to the evidence
+pipeline as separate vertical slices.
 
 To replay the first incident automatically:
 
@@ -127,6 +144,16 @@ cd frontend && npm install && npm run dev
 6. Evaluation expansion (complete): versioned multi-cause scenarios, cross-signal causal ranking, authority-aware actions, adversarial probes, and a visible reliability scorecard.
 7. Durable orchestration (complete): transactional outbox, verified Redis Streams repair, leased attempts with commit fencing, retries and dead letters, replay-safe side effects, commit-ordered SSE workflow receipts, and trace correlation.
 8A. Identity boundary (complete): fixed-issuer OIDC token verification and session exchange, database-backed membership and RBAC, server-derived actors, tenant-isolated incident/workflow access, CSRF protection, machine-authenticated alert ingestion, and server-controlled telemetry destinations.
-8B. Production integrations (next): provider-specific authorization-code/PKCE login, encrypted connector credentials, signed third-party webhooks, production evidence/action adapters, membership administration, and managed observability/export infrastructure.
+9A. Connector control plane (complete): tenant-owned provider contracts, write-only credential APIs, per-revision AES-GCM envelope encryption, exact-key rotation, optimistic updates, safe disabled defaults, RBAC, and append-only custody events.
+9B. GitHub evidence (next): GitHub App installation flow, signed webhook verification, replay protection, and real commit/deployment evidence.
+9C. Observability evidence (planned): bounded Prometheus and OpenTelemetry queries persisted as immutable evidence snapshots.
+9D. Collaboration outputs (planned): durable, idempotent Slack updates and GitHub issue creation.
+9E. Hosted identity and administration (planned): provider-specific OIDC authorization-code/PKCE login and membership administration.
 
-See [the architecture guide](docs/architecture.md), the [Phase 8A walkthrough](docs/milestones/08a-production-identity.md), and [ADR 0009](docs/decisions/0009-organization-scoped-identity-and-access.md) for the identity and tenant-isolation rationale. The [Phase 7 walkthrough](docs/milestones/07-durable-orchestration.md) and [ADR 0008](docs/decisions/0008-postgres-is-the-workflow-source-of-truth.md) cover durable execution.
+See [the Phase 9A walkthrough](docs/milestones/09a-connector-control-plane.md) and
+[ADR 0010](docs/decisions/0010-connector-secrets-use-envelope-encryption.md) for the credential
+custody contract. The [architecture guide](docs/architecture.md),
+[Phase 8A walkthrough](docs/milestones/08a-production-identity.md), and
+[ADR 0009](docs/decisions/0009-organization-scoped-identity-and-access.md) cover identity and tenant
+isolation; the [Phase 7 walkthrough](docs/milestones/07-durable-orchestration.md) and
+[ADR 0008](docs/decisions/0008-postgres-is-the-workflow-source-of-truth.md) cover durable execution.

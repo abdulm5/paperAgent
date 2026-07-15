@@ -1,5 +1,7 @@
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from opentelemetry.trace import SpanKind
 
 from app.api.router import api_router
@@ -21,6 +23,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def sanitized_request_validation_error(
+    _request: Request,
+    _error: RequestValidationError,
+) -> JSONResponse:
+    """Reject invalid requests without reflecting attacker-controlled material."""
+    return JSONResponse(status_code=422, content={"detail": "Request validation failed"})
 
 
 @app.middleware("http")

@@ -436,7 +436,55 @@ export type Permission =
   | "postmortems.edit"
   | "postmortems.finalize"
   | "evaluations.run"
-  | "organization.reset";
+  | "organization.reset"
+  | "connectors.read"
+  | "connectors.manage"
+  | "connectors.validate";
+
+export type ConnectorProvider = "github" | "prometheus" | "slack";
+export type ConnectorStatus = "configured" | "disabled" | "invalid";
+
+export interface ConnectorSummary {
+  id: string;
+  name: string;
+  provider: ConnectorProvider;
+  status: ConnectorStatus;
+  enabled: boolean;
+  version: number;
+  last_validated_at: string | null;
+  last_validation_message: string | null;
+  updated_at: string;
+}
+
+export interface ConnectorDetail extends ConnectorSummary {
+  configuration: Record<string, unknown>;
+  credential_fields: string[];
+  credential_version: number;
+  created_at: string;
+}
+
+export interface ConnectorEvent {
+  id: string;
+  event_type: string;
+  actor: string;
+  connector_version: number;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ConnectorCreatePayload {
+  name: string;
+  provider: ConnectorProvider;
+  configuration: Record<string, string>;
+  credentials: Record<string, string>;
+}
+
+export interface ConnectorUpdatePayload {
+  expected_version: number;
+  name?: string;
+  configuration?: Record<string, string>;
+  enabled?: boolean;
+}
 
 export interface AuthUser {
   id: string;
@@ -621,6 +669,56 @@ export async function switchOrganization(organizationId: string): Promise<AuthSe
 export async function deleteAuthSession(): Promise<void> {
   await request<void>("/api/v1/auth/session", { method: "DELETE" });
   setSessionCsrfToken(null);
+}
+
+export function getConnectors(): Promise<ConnectorSummary[]> {
+  return request<ConnectorSummary[]>("/api/v1/connectors");
+}
+
+export function getConnector(connectorId: string): Promise<ConnectorDetail> {
+  return request<ConnectorDetail>(`/api/v1/connectors/${connectorId}`);
+}
+
+export function getConnectorEvents(connectorId: string): Promise<ConnectorEvent[]> {
+  return request<ConnectorEvent[]>(`/api/v1/connectors/${connectorId}/events`);
+}
+
+export function createConnector(payload: ConnectorCreatePayload): Promise<ConnectorDetail> {
+  return request<ConnectorDetail>("/api/v1/connectors", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateConnector(
+  connectorId: string,
+  payload: ConnectorUpdatePayload,
+): Promise<ConnectorDetail> {
+  return request<ConnectorDetail>(`/api/v1/connectors/${connectorId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function rotateConnectorCredentials(
+  connectorId: string,
+  expectedVersion: number,
+  credentials: Record<string, string>,
+): Promise<ConnectorDetail> {
+  return request<ConnectorDetail>(`/api/v1/connectors/${connectorId}/credentials`, {
+    method: "PUT",
+    body: JSON.stringify({ expected_version: expectedVersion, credentials }),
+  });
+}
+
+export function validateConnector(
+  connectorId: string,
+  expectedVersion: number,
+): Promise<ConnectorDetail> {
+  return request<ConnectorDetail>(`/api/v1/connectors/${connectorId}/validate`, {
+    method: "POST",
+    body: JSON.stringify({ expected_version: expectedVersion }),
+  });
 }
 
 export function getIncidents(): Promise<IncidentSummary[]> {

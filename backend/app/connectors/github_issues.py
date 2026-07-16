@@ -353,7 +353,13 @@ class GitHubIssuePublisher:
         budget = _RequestBudget(self.limits.request_budget)
         self._validate_installation_binding(budget)
         token = self._installation_access_token(budget)
-        existing = self._reconcile(normalized_delivery_id, token=token, budget=budget)
+        existing = self._reconcile(
+            normalized_delivery_id,
+            expected_title=normalized_title,
+            expected_body=rendered_body,
+            token=token,
+            budget=budget,
+        )
         if existing is not None:
             return existing
 
@@ -496,6 +502,8 @@ class GitHubIssuePublisher:
         self,
         delivery_id: str,
         *,
+        expected_title: str,
+        expected_body: str,
         token: str,
         budget: _RequestBudget,
     ) -> GitHubIssueDeliveryReceipt | None:
@@ -537,6 +545,10 @@ class GitHubIssuePublisher:
                         "GitHub issue reconciliation returned a malformed body"
                     )
                 if marker in raw_body:
+                    if issue.get("title") != expected_title or raw_body != expected_body:
+                        raise GitHubIssueReconciliationAmbiguityError(
+                            "GitHub issue delivery content did not match the approved output"
+                        )
                     matches.append(
                         self._normalize_receipt(
                             issue,

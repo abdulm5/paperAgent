@@ -308,6 +308,11 @@ class IncidentRecord(Base):
     __table_args__ = (
         UniqueConstraint(
             "organization_id",
+            "id",
+            name="uq_incidents_organization_id",
+        ),
+        UniqueConstraint(
+            "organization_id",
             "active_fingerprint",
             name="uq_incidents_organization_active_fingerprint",
         ),
@@ -367,6 +372,7 @@ class IncidentRecord(Base):
         cascade="all, delete-orphan",
         order_by="CollaborationOutputRecord.requested_at",
         passive_deletes=True,
+        foreign_keys="CollaborationOutputRecord.incident_id",
     )
     postmortem: Mapped["PostmortemRecord | None"] = relationship(
         back_populates="incident",
@@ -600,6 +606,11 @@ class MitigationProposalRecord(Base):
     __tablename__ = "mitigation_proposals"
     __table_args__ = (
         Index("ix_mitigation_proposals_incident_created", "incident_id", "created_at"),
+        UniqueConstraint(
+            "incident_id",
+            "id",
+            name="uq_mitigation_proposals_incident_id",
+        ),
         UniqueConstraint("workflow_job_id", name="uq_mitigation_proposals_workflow_job_id"),
     )
 
@@ -654,6 +665,7 @@ class MitigationProposalRecord(Base):
         cascade="all, delete-orphan",
         order_by="CollaborationOutputRecord.requested_at",
         passive_deletes=True,
+        foreign_keys="CollaborationOutputRecord.proposal_id",
     )
 
 
@@ -702,6 +714,23 @@ class CollaborationOutputRecord(Base):
             name="fk_collaboration_outputs_tenant_connector",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["organization_id", "incident_id"],
+            ["incidents.organization_id", "incidents.id"],
+            name="fk_collaboration_outputs_tenant_incident",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["incident_id", "proposal_id"],
+            ["mitigation_proposals.incident_id", "mitigation_proposals.id"],
+            name="fk_collaboration_outputs_incident_proposal",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["incident_id", "workflow_run_id"],
+            ["workflow_runs.incident_id", "workflow_runs.id"],
+            name="fk_collaboration_outputs_incident_workflow",
+        ),
         CheckConstraint(
             "kind IN ('slack_update', 'github_issue')",
             name="ck_collaboration_outputs_kind",
@@ -735,16 +764,10 @@ class CollaborationOutputRecord(Base):
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
     )
-    incident_id: Mapped[UUID] = mapped_column(
-        ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False
-    )
-    proposal_id: Mapped[UUID] = mapped_column(
-        ForeignKey("mitigation_proposals.id", ondelete="CASCADE"), nullable=False
-    )
+    incident_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    proposal_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     connector_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
-    workflow_run_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("workflow_runs.id", ondelete="SET NULL"), unique=True
-    )
+    workflow_run_id: Mapped[UUID | None] = mapped_column(Uuid, unique=True)
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -762,9 +785,13 @@ class CollaborationOutputRecord(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_reason: Mapped[str | None] = mapped_column(String(500))
 
-    incident: Mapped[IncidentRecord] = relationship(back_populates="collaboration_outputs")
+    incident: Mapped[IncidentRecord] = relationship(
+        back_populates="collaboration_outputs",
+        foreign_keys=[incident_id],
+    )
     proposal: Mapped[MitigationProposalRecord] = relationship(
-        back_populates="collaboration_outputs"
+        back_populates="collaboration_outputs",
+        foreign_keys=[proposal_id],
     )
     decisions: Mapped[list["CollaborationDecisionRecord"]] = relationship(
         back_populates="output",
@@ -925,6 +952,11 @@ class WorkflowRunRecord(Base):
     __table_args__ = (
         Index("ix_workflow_runs_incident_created", "incident_id", "created_at"),
         Index("ix_workflow_runs_status_updated", "status", "updated_at"),
+        UniqueConstraint(
+            "incident_id",
+            "id",
+            name="uq_workflow_runs_incident_id",
+        ),
         UniqueConstraint("dedupe_key", name="uq_workflow_runs_dedupe_key"),
     )
 

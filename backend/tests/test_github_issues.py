@@ -96,6 +96,7 @@ def token_response(
 def issue_payload(
     *,
     number: int = 42,
+    title: object = "Checkout incident",
     body: str | None = None,
     html_url: str | None = None,
     pull_request: bool = False,
@@ -103,6 +104,7 @@ def issue_payload(
     payload: dict[str, object] = {
         "number": number,
         "html_url": html_url or f"https://github.com/{REPOSITORY}/issues/{number}",
+        "title": title,
         "body": body,
     }
     if pull_request:
@@ -114,6 +116,10 @@ def issue_payload(
 
 def marker(delivery_id: UUID = DELIVERY_ID) -> str:
     return f"<!-- pageragent-delivery:{delivery_id} -->"
+
+
+def rendered_body(body: str = "Body") -> str:
+    return f"{body}\n\n{marker()}"
 
 
 def make_publisher(
@@ -288,7 +294,7 @@ def test_reconciliation_returns_existing_issue_and_excludes_pull_requests() -> N
             200,
             json=[
                 issue_payload(number=41, body=marker(), pull_request=True),
-                issue_payload(number=42, body=marker()),
+                issue_payload(number=42, body=rendered_body()),
             ],
             request=request,
         )
@@ -302,6 +308,40 @@ def test_reconciliation_returns_existing_issue_and_excludes_pull_requests() -> N
         request.method == "POST" and request.url.path.endswith("/issues")
         for request in requests
     )
+    client.close()
+
+
+@pytest.mark.parametrize(
+    ("stored_title", "stored_body", "omit_title"),
+    [
+        ("Changed after approval", rendered_body(), False),
+        ("Checkout incident", marker(), False),
+        ("Checkout incident", rendered_body(), True),
+    ],
+)
+def test_matching_issue_marker_with_mismatched_content_fails_closed(
+    stored_title: str,
+    stored_body: str,
+    omit_title: bool,
+) -> None:
+    issue_requests = 0
+
+    def issues(request: httpx.Request) -> httpx.Response:
+        nonlocal issue_requests
+        issue_requests += 1
+        payload = issue_payload(title=stored_title, body=stored_body)
+        if omit_title:
+            payload.pop("title")
+        return httpx.Response(200, json=[payload], request=request)
+
+    publisher, client = make_publisher(provider_handler(issues))
+    with pytest.raises(GitHubIssueReconciliationAmbiguityError) as raised:
+        publisher.publish("Checkout incident", "Body", DELIVERY_ID)
+
+    assert issue_requests == 1
+    assert raised.value.permanent is True
+    assert raised.value.retryable is False
+    assert raised.value.ambiguous is True
     client.close()
 
 
@@ -346,7 +386,7 @@ def test_reconciliation_follows_only_a_bounded_generated_page_sequence() -> None
             )
         return httpx.Response(
             200,
-            json=[issue_payload(number=88, body=marker())],
+            json=[issue_payload(number=88, body=rendered_body())],
             request=request,
         )
 
@@ -388,7 +428,10 @@ def test_duplicate_reconciliation_matches_fail_closed() -> None:
     def issues(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json=[issue_payload(number=41, body=marker()), issue_payload(body=marker())],
+            json=[
+                issue_payload(number=41, body=rendered_body()),
+                issue_payload(body=rendered_body()),
+            ],
             request=request,
         )
 

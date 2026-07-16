@@ -31,6 +31,7 @@ TOKEN = "xoxb-SENTINEL-secret-token"
 DELIVERY_ID = UUID("5f17385c-4102-44b8-b53d-341ae50cc25f")
 MESSAGE_TS = "1784220000.123456"
 NOW = datetime(2026, 7, 16, 18, 0, tzinfo=UTC)
+EXPECTED_TEXT = "Checkout errors are elevated."
 
 
 def configuration() -> SlackConfiguration:
@@ -86,9 +87,11 @@ def delivery_message(
     *,
     delivery_id: str = str(DELIVERY_ID),
     timestamp: str = MESSAGE_TS,
+    text: object = EXPECTED_TEXT,
 ) -> dict[str, object]:
     return {
         "ts": timestamp,
+        "text": text,
         "metadata": {
             "event_type": "pageragent_delivery",
             "event_payload": {"delivery_id": delivery_id},
@@ -140,7 +143,7 @@ def test_publish_reconciles_then_posts_a_stably_marked_bounded_message() -> None
         )
 
     publisher, client = make_publisher(handler)
-    receipt = publisher.publish("Checkout errors are elevated.", DELIVERY_ID)
+    receipt = publisher.publish(EXPECTED_TEXT, DELIVERY_ID)
 
     assert [request.url.path for request in requests] == [
         "/api/conversations.history",
@@ -178,7 +181,7 @@ def test_publish_returns_reconciled_receipt_without_a_second_write() -> None:
         return history_response(request, [delivery_message()])
 
     publisher, client = make_publisher(handler)
-    receipt = publisher.publish("The original message must not be repeated.", DELIVERY_ID)
+    receipt = publisher.publish(EXPECTED_TEXT, DELIVERY_ID)
 
     assert requests == 1
     assert receipt.to_dict() == {
@@ -194,7 +197,13 @@ def test_multiple_reconciliation_matches_fail_closed_as_permanent_ambiguity() ->
     def handler(request: httpx.Request) -> httpx.Response:
         return history_response(
             request,
-            [delivery_message(), delivery_message(timestamp="1784220001.123456")],
+            [
+                delivery_message(text="Do not create a third message."),
+                delivery_message(
+                    timestamp="1784220001.123456",
+                    text="Do not create a third message.",
+                ),
+            ],
         )
 
     publisher, client = make_publisher(handler)
@@ -205,6 +214,31 @@ def test_multiple_reconciliation_matches_fail_closed_as_permanent_ambiguity() ->
     assert raised.value.retryable is False
     assert raised.value.ambiguous is True
     assert raised.value.code == "slack_reconciliation_ambiguous"
+    client.close()
+
+
+@pytest.mark.parametrize("stored_text", ["Changed after approval", None])
+def test_matching_delivery_metadata_with_mismatched_content_fails_closed(
+    stored_text: object,
+) -> None:
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        message = delivery_message(text=stored_text)
+        if stored_text is None:
+            message.pop("text")
+        return history_response(request, [message])
+
+    publisher, client = make_publisher(handler)
+    with pytest.raises(SlackReconciliationAmbiguityError) as raised:
+        publisher.publish(EXPECTED_TEXT, DELIVERY_ID)
+
+    assert requests == 1
+    assert raised.value.permanent is True
+    assert raised.value.retryable is False
+    assert raised.value.ambiguous is True
     client.close()
 
 

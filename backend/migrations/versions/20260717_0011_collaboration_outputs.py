@@ -125,6 +125,22 @@ def _assert_collaboration_ledger_is_empty() -> None:
 
 
 def upgrade() -> None:
+    with op.batch_alter_table("incidents") as batch_op:
+        batch_op.create_unique_constraint(
+            "uq_incidents_organization_id",
+            ["organization_id", "id"],
+        )
+    with op.batch_alter_table("mitigation_proposals") as batch_op:
+        batch_op.create_unique_constraint(
+            "uq_mitigation_proposals_incident_id",
+            ["incident_id", "id"],
+        )
+    with op.batch_alter_table("workflow_runs") as batch_op:
+        batch_op.create_unique_constraint(
+            "uq_workflow_runs_incident_id",
+            ["incident_id", "id"],
+        )
+
     op.create_table(
         "collaboration_outputs",
         sa.Column("id", sa.Uuid(), nullable=False),
@@ -185,10 +201,6 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["organization_id"], ["organizations.id"], ondelete="RESTRICT"
         ),
-        sa.ForeignKeyConstraint(["incident_id"], ["incidents.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(
-            ["proposal_id"], ["mitigation_proposals.id"], ondelete="CASCADE"
-        ),
         sa.ForeignKeyConstraint(
             ["organization_id", "connector_id"],
             ["connectors.organization_id", "connectors.id"],
@@ -196,7 +208,21 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["workflow_run_id"], ["workflow_runs.id"], ondelete="SET NULL"
+            ["organization_id", "incident_id"],
+            ["incidents.organization_id", "incidents.id"],
+            name="fk_collaboration_outputs_tenant_incident",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["incident_id", "proposal_id"],
+            ["mitigation_proposals.incident_id", "mitigation_proposals.id"],
+            name="fk_collaboration_outputs_incident_proposal",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["incident_id", "workflow_run_id"],
+            ["workflow_runs.incident_id", "workflow_runs.id"],
+            name="fk_collaboration_outputs_incident_workflow",
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
@@ -293,3 +319,18 @@ def downgrade() -> None:
         table_name="collaboration_outputs",
     )
     op.drop_table("collaboration_outputs")
+    with op.batch_alter_table("workflow_runs") as batch_op:
+        batch_op.drop_constraint(
+            "uq_workflow_runs_incident_id",
+            type_="unique",
+        )
+    with op.batch_alter_table("mitigation_proposals") as batch_op:
+        batch_op.drop_constraint(
+            "uq_mitigation_proposals_incident_id",
+            type_="unique",
+        )
+    with op.batch_alter_table("incidents") as batch_op:
+        batch_op.drop_constraint(
+            "uq_incidents_organization_id",
+            type_="unique",
+        )

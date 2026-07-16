@@ -5,6 +5,7 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth.constants import DEFAULT_ORGANIZATION_ID, DEFAULT_ORGANIZATION_SLUG
@@ -15,6 +16,7 @@ from app.db.models import (
     CollaborationOutputRecord,
     ConnectorRecord,
     IncidentEventRecord,
+    IncidentRecord,
     OutboxMessageRecord,
     WorkflowEventRecord,
     WorkflowJobRecord,
@@ -35,6 +37,7 @@ from app.services.collaboration import (
 )
 from app.services.connectors import ConnectorService
 from app.workflows.engine import ExecutionDisposition, WorkflowEngine
+from app.workflows.errors import PermanentWorkflowError
 from tests.conftest import TEST_USER_ID
 from tests.test_proposals import RecordingExecutor, incident_with_investigation, proposal_service
 
@@ -71,6 +74,12 @@ class RetryableProviderError(RuntimeError):
     retryable = True
     ambiguous = True
     retry_after_seconds = 17
+
+
+class PermanentAmbiguousProviderError(RuntimeError):
+    permanent = True
+    retryable = False
+    ambiguous = True
 
 
 def _session_factory(session: Session):
@@ -215,6 +224,60 @@ def test_prepare_rejects_stale_proposal_and_missing_service_connector(
             actor="user:responder",
         )
 
+
+@pytest.mark.parametrize("crossed_reference", ["proposal", "workflow"])
+def test_database_rejects_cross_incident_collaboration_references(
+    db_session: Session,
+    crossed_reference: str,
+) -> None:
+    connector = _create_enabled_slack_connector(db_session)
+    first_incident_id, first_proposal = _proposal_fixture(db_session)
+    first_incident = db_session.get(IncidentRecord, first_incident_id)
+    assert first_incident is not None
+    first_incident.active_fingerprint = None
+    first_incident.status = "resolved"
+    first_incident.resolved_at = datetime.now(UTC)
+    db_session.commit()
+    second_incident_id, second_proposal = _proposal_fixture(db_session)
+    assert first_incident_id != second_incident_id
+    workflow = WorkflowRunRecord(
+        incident_id=second_incident_id,
+        workflow_type="collaboration",
+        status="queued",
+        current_step="deliver_collaboration_output",
+        dedupe_key=f"cross-incident-{crossed_reference}",
+        trace_id="f" * 32,
+        version=1,
+    )
+    db_session.add(workflow)
+    db_session.flush()
+    with pytest.raises(IntegrityError):
+        db_session.execute(
+            CollaborationOutputRecord.__table__.insert().values(
+                organization_id=DEFAULT_ORGANIZATION_ID,
+                incident_id=first_incident_id,
+                proposal_id=(
+                    second_proposal.id
+                    if crossed_reference == "proposal"
+                    else first_proposal.id
+                ),
+                connector_id=connector.id,
+                workflow_run_id=(
+                    workflow.id if crossed_reference == "workflow" else None
+                ),
+                kind="slack_update",
+                provider="slack",
+                status="pending_approval",
+                version=1,
+                destination="C0123456789",
+                payload={"text": "crossed reference fixture"},
+                content_sha256="a" * 64,
+                connector_version=connector.version,
+                credential_version=connector.credential.credential_version,
+                requested_by="user:test-responder",
+            )
+        )
+    db_session.rollback()
 
 def test_rejection_is_separate_from_mitigation_and_never_queues(
     db_session: Session,
@@ -385,6 +448,55 @@ def test_delivery_persists_normalized_receipt_and_replay_does_not_publish_twice(
     assert "text" not in events[0].payload
 
 
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ("payload", "collaboration_content_integrity_failed"),
+        ("destination", "collaboration_destination_changed"),
+    ],
+)
+def test_delivery_rejects_post_approval_packet_mutation_before_provider_io(
+    db_session: Session,
+    mutation: str,
+    expected_code: str,
+) -> None:
+    _create_enabled_slack_connector(db_session)
+    incident_id, proposal = _proposal_fixture(db_session)
+    calls: list[tuple[str, UUID]] = []
+
+    def factory(_configuration, _credentials):
+        return RecordingSlackPublisher(calls)
+
+    service, output = _prepare_slack(
+        db_session,
+        incident_id,
+        proposal,
+        factory=factory,
+    )
+    approved = service.decide(
+        output.id,
+        CollaborationDecisionRequest(
+            decision="approve",
+            expected_version=output.version,
+            expected_content_sha256=output.content_sha256,
+            actor="user:incident-commander",
+        ),
+    )
+    stored = db_session.get(CollaborationOutputRecord, approved.id)
+    assert stored is not None
+    if mutation == "payload":
+        stored.payload = {"text": "This was not the approved incident update."}
+    else:
+        stored.destination = "G0123456789"
+    db_session.commit()
+
+    with pytest.raises(PermanentWorkflowError) as captured:
+        service.deliver(approved.id)
+
+    assert captured.value.code == expected_code
+    assert calls == []
+
+
 def test_retryable_ambiguous_provider_failure_uses_workflow_retry_and_receipt(
     db_session: Session,
 ) -> None:
@@ -457,3 +569,66 @@ def test_retryable_ambiguous_provider_failure_uses_workflow_retry_and_receipt(
             "incident",
             "collaboration",
         ]
+
+
+def test_permanent_reconciliation_ambiguity_dead_letters_without_retry(
+    db_session: Session,
+) -> None:
+    _create_enabled_slack_connector(db_session)
+    incident_id, proposal = _proposal_fixture(db_session)
+    calls: list[tuple[str, UUID]] = []
+
+    def factory(_configuration, _credentials):
+        return RecordingSlackPublisher(
+            calls,
+            fail=PermanentAmbiguousProviderError("contradictory remote receipts"),
+        )
+
+    service, output = _prepare_slack(
+        db_session,
+        incident_id,
+        proposal,
+        factory=factory,
+    )
+    approved = service.decide(
+        output.id,
+        CollaborationDecisionRequest(
+            decision="approve",
+            expected_version=output.version,
+            expected_content_sha256=output.content_sha256,
+            actor="user:incident-commander",
+        ),
+    )
+    job_id = db_session.scalar(
+        select(WorkflowJobRecord.id).where(
+            WorkflowJobRecord.workflow_run_id == approved.workflow_run_id
+        )
+    )
+    assert job_id is not None
+    factory_session = _session_factory(db_session)
+
+    def handler(session: Session, job: WorkflowJobRecord, fence):
+        return CollaborationService(
+            session,
+            slack_publisher_factory=factory,
+        ).deliver(
+            UUID(str(job.payload["collaboration_output_id"])),
+            fence=fence,
+        ).model_dump(mode="json")
+
+    result = WorkflowEngine(
+        factory_session,
+        worker_id="collaboration-worker",
+        handlers={"deliver_collaboration_output": handler},
+    ).execute(job_id)
+
+    assert result.disposition is ExecutionDisposition.DEAD_LETTERED
+    with factory_session() as session:
+        stored = CollaborationService(session).get(output.id)
+        job = session.get(WorkflowJobRecord, job_id)
+        assert job is not None
+        assert job.status == "dead_lettered"
+        assert stored.status == "dead_lettered"
+        assert stored.delivery is not None
+        assert stored.delivery.last_error_code == "provider_reconciliation_ambiguous"
+        assert session.scalar(select(func.count()).select_from(OutboxMessageRecord)) == 1

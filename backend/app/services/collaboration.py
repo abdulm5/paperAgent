@@ -228,18 +228,15 @@ class CollaborationService:
             else:
                 destination = str(configuration["repository"])
                 payload = self.draft_builder.github_payload(output_id, incident, proposal)
-            content_sha256 = canonical_hash(
-                {
-                    "builder_version": self.draft_builder.version,
-                    "proposal_hash": proposal.input_hash,
-                    "kind": kind.value,
-                    "provider": provider.value,
-                    "destination": destination,
-                    "payload": payload,
-                    "connector_id": str(connector.id),
-                    "connector_version": connector.version,
-                    "credential_version": connector.credential.credential_version,
-                }
+            content_sha256 = self._content_hash(
+                proposal_hash=proposal.input_hash,
+                kind=kind.value,
+                provider=provider.value,
+                destination=destination,
+                payload=payload,
+                connector_id=connector.id,
+                connector_version=connector.version,
+                credential_version=connector.credential.credential_version,
             )
             output = CollaborationOutputRecord(
                 id=output_id,
@@ -471,21 +468,11 @@ class CollaborationService:
                 "Approved collaboration connector is unavailable",
                 code="collaboration_connector_unavailable",
             ) from error
-        if (
-            runtime.organization_id != self.organization_id
-            or runtime.connector_version != output.connector_version
-            or runtime.credential_version != output.credential_version
-        ):
+        if runtime.organization_id != self.organization_id:
             self.session.rollback()
             raise PermanentWorkflowError(
-                "Approved collaboration connector revision changed",
-                code="collaboration_connector_revision_changed",
-            )
-        if runtime.configuration.service != output.incident.service:
-            self.session.rollback()
-            raise PermanentWorkflowError(
-                "Approved collaboration service binding changed",
-                code="collaboration_service_binding_changed",
+                "Approved collaboration connector ownership changed",
+                code="collaboration_connector_unavailable",
             )
         self.session.rollback()
 
@@ -506,6 +493,86 @@ class CollaborationService:
         if output.status == CollaborationOutputStatus.DELIVERED.value:
             self.session.rollback()
             return self.get(output.id)
+        connector = self.session.scalar(
+            select(ConnectorRecord)
+            .where(
+                ConnectorRecord.id == output.connector_id,
+                ConnectorRecord.organization_id == self.organization_id,
+            )
+            .options(selectinload(ConnectorRecord.credential))
+            .with_for_update()
+        )
+        if connector is None or connector.credential is None:
+            self.session.rollback()
+            raise PermanentWorkflowError(
+                "Approved collaboration connector is unavailable",
+                code="collaboration_connector_unavailable",
+            )
+        if (
+            not connector.enabled
+            or connector.status != ConnectorStatus.CONFIGURED.value
+            or connector.version != output.connector_version
+            or connector.credential.credential_version != output.credential_version
+            or runtime.connector_version != output.connector_version
+            or runtime.credential_version != output.credential_version
+        ):
+            self.session.rollback()
+            raise PermanentWorkflowError(
+                "Approved collaboration connector revision changed",
+                code="collaboration_connector_revision_changed",
+            )
+        incident_service = self.session.scalar(
+            select(IncidentRecord.service).where(
+                IncidentRecord.id == output.incident_id,
+                IncidentRecord.organization_id == self.organization_id,
+            )
+        )
+        proposal_hash = self.session.scalar(
+            select(MitigationProposalRecord.input_hash).where(
+                MitigationProposalRecord.id == output.proposal_id,
+                MitigationProposalRecord.incident_id == output.incident_id,
+            )
+        )
+        if incident_service is None or proposal_hash is None:
+            self.session.rollback()
+            raise PermanentWorkflowError(
+                "Approved collaboration grounding record is unavailable",
+                code="collaboration_grounding_unavailable",
+            )
+        live_destination = (
+            runtime.configuration.channel
+            if output.provider == CollaborationProvider.SLACK.value
+            else runtime.configuration.repository
+        )
+        if runtime.configuration.service != incident_service:
+            self.session.rollback()
+            raise PermanentWorkflowError(
+                "Approved collaboration service binding changed",
+                code="collaboration_service_binding_changed",
+            )
+        if live_destination != output.destination:
+            self.session.rollback()
+            raise PermanentWorkflowError(
+                "Approved collaboration destination changed",
+                code="collaboration_destination_changed",
+            )
+        payload = dict(output.payload)
+        expected_content_sha256 = self._content_hash(
+            proposal_hash=proposal_hash,
+            kind=output.kind,
+            provider=output.provider,
+            destination=output.destination,
+            payload=payload,
+            connector_id=output.connector_id,
+            connector_version=output.connector_version,
+            credential_version=output.credential_version,
+        )
+        if expected_content_sha256 != output.content_sha256:
+            self.session.rollback()
+            raise PermanentWorkflowError(
+                "Approved collaboration content failed its integrity check",
+                code="collaboration_content_integrity_failed",
+            )
         now = datetime.now(UTC)
         output.status = CollaborationOutputStatus.DELIVERING.value
         output.failure_reason = None
@@ -516,7 +583,6 @@ class CollaborationService:
         output.delivery.started_at = output.delivery.started_at or now
         output.delivery.updated_at = now
         attempt = output.delivery.attempt_count
-        payload = dict(output.payload)
         provider = output.provider
         commit_with_fence(self.session, fence)
 
@@ -536,17 +602,22 @@ class CollaborationService:
                     delivery_id=output_id,
                 )
         except Exception as error:
+            permanent = bool(getattr(error, "permanent", False))
             retryable = bool(getattr(error, "retryable", False))
             ambiguous = bool(getattr(error, "ambiguous", False))
             code = (
-                "provider_delivery_ambiguous"
+                "provider_reconciliation_ambiguous"
+                if permanent and ambiguous
+                else "provider_delivery_ambiguous"
                 if ambiguous
                 else "provider_delivery_retryable"
                 if retryable
                 else "provider_delivery_rejected"
             )
             workflow_error = (
-                RetryableWorkflowError
+                PermanentWorkflowError
+                if permanent
+                else RetryableWorkflowError
                 if retryable or ambiguous
                 else PermanentWorkflowError
             )
@@ -670,6 +741,32 @@ class CollaborationService:
             CollaborationProvider.SLACK
             if kind is CollaborationOutputKind.SLACK_UPDATE
             else CollaborationProvider.GITHUB
+        )
+
+    def _content_hash(
+        self,
+        *,
+        proposal_hash: str,
+        kind: str,
+        provider: str,
+        destination: str,
+        payload: dict[str, Any],
+        connector_id: UUID,
+        connector_version: int,
+        credential_version: int,
+    ) -> str:
+        return canonical_hash(
+            {
+                "builder_version": self.draft_builder.version,
+                "proposal_hash": proposal_hash,
+                "kind": kind,
+                "provider": provider,
+                "destination": destination,
+                "payload": payload,
+                "connector_id": str(connector_id),
+                "connector_version": connector_version,
+                "credential_version": credential_version,
+            }
         )
 
     @staticmethod

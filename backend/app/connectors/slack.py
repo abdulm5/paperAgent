@@ -279,7 +279,11 @@ class SlackIncidentPublisher:
         budget = _RequestBudget(self.limits.request_budget)
 
         history = self._history(budget, require_complete=True)
-        existing_receipt = self._reconciled_receipt(history, normalized_delivery_id)
+        existing_receipt = self._reconciled_receipt(
+            history,
+            normalized_delivery_id,
+            expected_text=normalized_text,
+        )
         if existing_receipt is not None:
             return existing_receipt
 
@@ -364,6 +368,8 @@ class SlackIncidentPublisher:
         self,
         messages: list[dict[str, JsonValue]],
         delivery_id: str,
+        *,
+        expected_text: str,
     ) -> SlackDeliveryReceipt | None:
         message_timestamps: list[str] = []
         for message in messages:
@@ -383,6 +389,10 @@ class SlackIncidentPublisher:
                 )
             if event_payload.get("delivery_id") != delivery_id:
                 continue
+            if message.get("text") != expected_text:
+                raise SlackReconciliationAmbiguityError(
+                    "Slack history delivery content did not match the approved output"
+                )
             try:
                 message_timestamps.append(self._normalized_message_ts(message.get("ts")))
             except SlackProviderResponseError:

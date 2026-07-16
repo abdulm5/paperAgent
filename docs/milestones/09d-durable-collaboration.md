@@ -18,6 +18,7 @@ external-write crash window.
   contains only the collaboration output ID.
 - Slack and GitHub use a stable UUID marker and bounded reconciliation before writing, so an
   ambiguous prior attempt can recover its provider receipt instead of blindly duplicating output.
+  The marker is accepted only when the remote text/title/body exactly matches the approved packet.
 - Provider responses are normalized into small, tenant-safe receipts. Tokens, raw response bodies,
   draft content, and exception text never enter workflow errors or telemetry.
 - Retryable failures follow the existing exponential schedule and provider retry hint. Permanent
@@ -90,7 +91,10 @@ GitHub's [issue creation API](https://docs.github.com/en/rest/issues/issues#crea
 note. `collaboration_deliveries` is the one-to-one operational receipt with the stable idempotency
 key, attempt count, normalized provider receipt, safe error code, and timestamps.
 
-The worker records `delivering` before network I/O. A process crash after the provider write leaves
+Immediately before that checkpoint, the worker locks the exact connector revision, recomputes the
+approved packet's canonical hash, verifies its frozen channel/repository, and follows composite
+tenant → incident → proposal → workflow foreign keys. The worker records `delivering` before
+network I/O. A process crash after the provider write leaves
 that checkpoint, and the next leased attempt reconciles the same marker. Workflow fencing prevents
 an expired worker from later committing a receipt over its successor. Final workflow failure and
 the collaboration receipt update in the same database transaction.

@@ -45,11 +45,7 @@ def test_empty_collaboration_migration_round_trips_on_sqlite(tmp_path: Path) -> 
             column["name"]
             for column in inspector.get_columns("collaboration_outputs")
         }
-        assert (
-            ("organization_id", "connector_id"),
-            "connectors",
-            ("organization_id", "id"),
-        ) in {
+        foreign_keys = {
             (
                 tuple(constraint["constrained_columns"]),
                 constraint["referred_table"],
@@ -57,6 +53,28 @@ def test_empty_collaboration_migration_round_trips_on_sqlite(tmp_path: Path) -> 
             )
             for constraint in inspector.get_foreign_keys("collaboration_outputs")
         }
+        assert {
+            (
+                ("organization_id", "connector_id"),
+                "connectors",
+                ("organization_id", "id"),
+            ),
+            (
+                ("organization_id", "incident_id"),
+                "incidents",
+                ("organization_id", "id"),
+            ),
+            (
+                ("incident_id", "proposal_id"),
+                "mitigation_proposals",
+                ("incident_id", "id"),
+            ),
+            (
+                ("incident_id", "workflow_run_id"),
+                "workflow_runs",
+                ("incident_id", "id"),
+            ),
+        } <= foreign_keys
         with engine.connect() as connection:
             assert (
                 connection.exec_driver_sql(

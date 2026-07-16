@@ -711,11 +711,19 @@ class WorkflowEngine:
             output_id = UUID(str(raw_output_id))
         except (TypeError, ValueError):
             return
+        organization_id = session.scalar(
+            select(IncidentRecord.organization_id).where(
+                IncidentRecord.id == run.incident_id
+            )
+        )
+        if organization_id is None:
+            return
         output = session.scalar(
             select(CollaborationOutputRecord)
             .where(
                 CollaborationOutputRecord.id == output_id,
                 CollaborationOutputRecord.incident_id == run.incident_id,
+                CollaborationOutputRecord.organization_id == organization_id,
             )
             .options(selectinload(CollaborationOutputRecord.delivery))
             .with_for_update()

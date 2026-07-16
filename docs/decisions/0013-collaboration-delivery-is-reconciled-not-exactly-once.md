@@ -31,8 +31,9 @@ PagerAgent treats collaboration as a separate, explicitly approved domain workfl
 5. Every output receives one stable UUID delivery marker. Slack receives it as `client_msg_id` and
    message metadata. GitHub receives it as an HTML comment in the issue body.
 6. Before every write, the adapter performs a bounded recent-history reconciliation. Exactly one
-   matching marker becomes a reconciled receipt; no match permits one write; contradictory matches
-   or an incomplete search fail closed.
+   marker with the exact approved text/title/body becomes a reconciled receipt; a marker attached
+   to altered content, contradictory matches, or an incomplete search fail closed. No match permits
+   one write.
 7. Provider calls use fixed origins and paths, disabled redirects and environment proxies, hard
    request/response/time limits, sanitized errors, and bounded retry hints. The connector and
    credential revisions are checked again immediately before delivery.
@@ -81,5 +82,8 @@ exposure and let relay repair reconstruct work without copying mutable content b
   the App permission boundary and therefore forces a new validation cycle.
 - Reconciliation deliberately refuses to write when the bounded search is incomplete. Operators
   can inspect the dead-letter receipt instead of receiving a false success or a likely duplicate.
+- Delivery recomputes the frozen content hash and checks the exact provider destination under the
+  connector revision lock. Composite tenant/incident/proposal/workflow foreign keys prevent a
+  corrupted row from combining authority receipts from different incident aggregates.
 - This is effectively-once behavior for a marked domain output over at-least-once execution, not a
   distributed exactly-once guarantee.

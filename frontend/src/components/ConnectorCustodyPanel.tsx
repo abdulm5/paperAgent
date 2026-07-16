@@ -62,6 +62,7 @@ const PROVIDER_CONTRACTS: Record<ConnectorProvider, ProviderContract> = {
     label: "Prometheus",
     noun: "telemetry evidence",
     configuration: [
+      { key: "service", label: "Service binding", hint: "checkout-api" },
       { key: "base_url", label: "Base URL", hint: "https://metrics.example.com", inputMode: "url" },
     ],
     credentials: [
@@ -787,6 +788,8 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
                           ? "This legacy receipt does not attest to a successful validation. Validate again before enabling."
                           : detail.provider === "github"
                             ? "GitHub App provider handshake succeeded."
+                            : detail.provider === "prometheus"
+                              ? "Prometheus provider handshake succeeded."
                             : "PagerAgent verified the local contract and sealed-envelope integrity."}
                     {detail.last_validation_message ? (
                       <span className="validation-server-message">
@@ -807,7 +810,9 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
                     allowed={canValidate}
                     message={detail.provider === "github"
                       ? "Only administrators can run the GitHub App handshake and vault-integrity check."
-                      : "Only administrators can run the local contract and vault-integrity check."}
+                      : detail.provider === "prometheus"
+                        ? "Only administrators can run the Prometheus handshake and vault-integrity check."
+                        : "Only administrators can run the local contract and vault-integrity check."}
                     permission="connectors.validate"
                   />
                 </div>

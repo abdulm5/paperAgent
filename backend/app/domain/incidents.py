@@ -20,10 +20,14 @@ class IncidentStatus(StrEnum):
 
 
 class MetricEvidence(BaseModel):
-    name: str = Field(min_length=1)
+    name: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z_:][A-Za-z0-9_:]*$",
+    )
     value: float = Field(ge=0)
     threshold: float = Field(ge=0)
-    window_seconds: int = Field(gt=0)
+    window_seconds: int = Field(gt=0, le=86_400)
     request_count: int = Field(ge=0)
     failed_request_count: int = Field(ge=0)
 

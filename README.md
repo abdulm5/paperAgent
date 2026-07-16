@@ -4,12 +4,11 @@ PagerAgent is an evidence-grounded incident-response copilot. It helps an on-cal
 
 ## Project status
 
-**Phase 9B — authenticated GitHub evidence.** PagerAgent now turns an encrypted, tenant-owned
-GitHub App connector into bounded incident evidence. It performs a real installation/repository
-handshake, verifies webhook HMACs over raw bytes, absorbs delivery retries in a durable PostgreSQL
-inbox, and snapshots normalized commits, pull requests, deployments, releases, and webhook receipts
-for deterministic ranking. Private keys, webhook secrets, App JWTs, and installation tokens never
-enter the evidence graph.
+**Phase 9C.1 — bounded Prometheus metric evidence.** PagerAgent now turns an encrypted,
+tenant/service-owned Prometheus connector into one bounded, content-hashed metric snapshot. A
+server-owned query catalog prevents arbitrary PromQL, connector revisions fence provider I/O, and
+the live error-rate window can only corroborate an existing causal signal. GitHub evidence remains
+authenticated and bounded; OpenTelemetry/backend-specific logs and traces are the next 9C slice.
 
 ## The interview story
 
@@ -19,12 +18,13 @@ PagerAgent is designed around a simple principle: the model synthesizes evidence
 2. An administrator provisions a disabled provider connector through a typed contract; PagerAgent
    seals its write-only credential with a per-revision data key and records a sanitized custody
    event before the connector can be validated and enabled.
-3. For GitHub, validation exchanges a short-lived App JWT for a repository-scoped installation
-   token outside the database lock. Signed change deliveries enter a replay-safe provider inbox.
+3. Provider validation happens outside database locks, then compare-and-swaps the connector and
+   credential revisions. GitHub uses a repository-scoped installation token; Prometheus uses one
+   fixed credential-bearing read query.
 4. A versioned simulator scenario introduces a code, configuration, or dependency failure.
 5. Tenant-authenticated telemetry crosses an alert threshold and atomically creates an incident, durable workflow, first job, workflow events, and outbox message in PostgreSQL.
 6. A separate relay publishes the job to Redis Streams; a database-leased worker gathers telemetry,
-   normalized GitHub evidence, and runbooks, then ranks causal signals.
+   bounded Prometheus metrics, normalized GitHub evidence, and runbooks, then ranks causal signals.
 7. PagerAgent proposes a cited typed action—or blocks automation when the evidence points outside its authority—without losing work if a process restarts.
 8. An authorized human approves or rejects the proposal. Approval atomically queues a separate mitigation workflow instead of performing the external write in the request.
 9. The worker executes the allow-listed action with a proposal-scoped idempotency key and records recovery verification before the incident is mitigated.
@@ -75,10 +75,13 @@ To demonstrate the connector custody boundary independently from an incident:
 ```
 
 The script creates a disabled Prometheus connector, proves the submitted token is absent from every
-API and audit response, validates the authenticated envelope, enables the connector with an
-optimistic version check, rotates the credential back into a disabled state, and prints the
-sanitized custody history. It intentionally remains the Phase 9A storage/authorization proof and
-makes no provider network request.
+API and audit response, performs the live fixed read handshake, enables the connector with an
+optimistic version check, rotates the credential back into a disabled state, revalidates it, and
+prints the sanitized custody history. Run `./scripts/run-demo.sh` afterward to persist the bounded
+`prometheus_metric_snapshot` and show its query/window/count/revision receipt in the investigation.
+The local Prometheus container is a reproducible adapter proof, not a claim of production identity
+or egress isolation; hosted deployments require an HTTPS authorization boundary and an outbound
+network policy restricted to the configured origin.
 
 To run the live GitHub evidence proof, export a GitHub App installation and a separate webhook
 secret, then run:
@@ -178,13 +181,16 @@ cd frontend && npm install && npm run dev
 8A. Identity boundary (complete): fixed-issuer OIDC token verification and session exchange, database-backed membership and RBAC, server-derived actors, tenant-isolated incident/workflow access, CSRF protection, machine-authenticated alert ingestion, and server-controlled telemetry destinations.
 9A. Connector control plane (complete): tenant-owned provider contracts, write-only credential APIs, per-revision AES-GCM envelope encryption, exact-key rotation, optimistic updates, safe disabled defaults, RBAC, and append-only custody events.
 9B. GitHub evidence (complete): multiline App-key custody, repository-scoped installation authorization, two-phase provider validation, signed webhook verification, durable replay protection, bounded/rate-aware REST collection, and normalized commit/PR/deployment/release evidence.
-9C. Observability evidence (planned): bounded Prometheus and OpenTelemetry queries persisted as immutable evidence snapshots.
+9C.1. Prometheus evidence (complete): server-owned PromQL catalog, bounded range collection, revision-fenced tenant/service selection, immutable metric snapshots, and conservative causal corroboration.
+9C.2. Logs and traces (planned): bounded, backend-specific APIs for OpenTelemetry-derived telemetry.
 9D. Collaboration outputs (planned): durable, idempotent Slack updates and GitHub issue creation.
 9E. Hosted identity and administration (planned): provider-specific OIDC authorization-code/PKCE login and membership administration.
 
-See [the Phase 9B walkthrough](docs/milestones/09b-github-evidence.md) and
-[ADR 0011](docs/decisions/0011-github-deliveries-are-authenticated-idempotent-inputs.md) for the
-GitHub trust boundary. [Phase 9A](docs/milestones/09a-connector-control-plane.md) and
+See [the Phase 9C.1 walkthrough](docs/milestones/09c-observability-evidence.md) and
+[ADR 0012](docs/decisions/0012-observability-evidence-is-bounded-before-it-is-causal.md) for the
+Prometheus query, network, and causal boundary. [The Phase 9B walkthrough](docs/milestones/09b-github-evidence.md)
+and [ADR 0011](docs/decisions/0011-github-deliveries-are-authenticated-idempotent-inputs.md) cover
+the GitHub trust boundary. [Phase 9A](docs/milestones/09a-connector-control-plane.md) and
 [ADR 0010](docs/decisions/0010-connector-secrets-use-envelope-encryption.md) cover credential
 custody. The [architecture guide](docs/architecture.md),
 [Phase 8A walkthrough](docs/milestones/08a-production-identity.md), and

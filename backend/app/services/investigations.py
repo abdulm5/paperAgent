@@ -29,6 +29,7 @@ from app.domain.investigations import (
     RunbookMatch,
     RunbookSection,
 )
+from app.domain.prometheus import PrometheusEvidenceBundle
 from app.investigation.causes import CauseRanker
 from app.investigation.clustering import ErrorClusterer
 from app.investigation.collectors import HttpTelemetryCollector, TelemetryCollector
@@ -37,6 +38,10 @@ from app.investigation.runbooks import RunbookRetriever
 from app.investigation.text import canonical_hash
 from app.services.github_evidence import TenantGitEvidenceProvider
 from app.services.incidents import IncidentNotFoundError
+from app.services.prometheus_evidence import (
+    InvestigationPrometheusProvider,
+    TenantPrometheusEvidenceProvider,
+)
 from app.workflows.fencing import (
     WorkflowFence,
     WorkflowLeaseLostError,
@@ -63,6 +68,7 @@ class InvestigationService:
         cause_ranker: CauseRanker,
         runbook_retriever: RunbookRetriever,
         *,
+        prometheus_provider: InvestigationPrometheusProvider | None = None,
         organization_id: UUID = DEFAULT_ORGANIZATION_ID,
     ) -> None:
         self.session = session
@@ -73,6 +79,7 @@ class InvestigationService:
         self.commit_ranker = commit_ranker
         self.cause_ranker = cause_ranker
         self.runbook_retriever = runbook_retriever
+        self.prometheus_provider = prometheus_provider
 
     def run(
         self,
@@ -98,6 +105,11 @@ class InvestigationService:
                 "cause_ranker": self.cause_ranker.version,
                 "retriever": self.runbook_retriever.version,
                 "git_provider": self.git_provider.version,
+                "prometheus_provider": (
+                    self.prometheus_provider.version
+                    if self.prometheus_provider is not None
+                    else "disabled"
+                ),
             }
         )
         run = None
@@ -157,12 +169,29 @@ class InvestigationService:
                 failure_mode=failure_mode,
                 query=query,
             )
+            prometheus_evidence: PrometheusEvidenceBundle | None = None
+            if self.prometheus_provider is not None:
+                prometheus_evidence = self.prometheus_provider.collect_evidence(
+                    metric_name=alert.metric.name,
+                    service=incident_service,
+                    observed_at=alert.detected_at,
+                    window_seconds=min(
+                        alert.metric.window_seconds,
+                        settings.prometheus_max_window_seconds,
+                    ),
+                )
             git_evidence = self.git_provider.collect_evidence(
                 deployed_at,
                 incident_service,
                 active_commit_sha,
             )
             commits = git_evidence.commits
+
+            # GitHub returns holding its connector revision lock. Prometheus was
+            # collected first without a transaction; fence that revision now so
+            # both provider authorizations remain stable through the evidence commit.
+            if self.prometheus_provider is not None:
+                self.prometheus_provider.lock_current_revision(prometheus_evidence)
 
             # All network and filesystem reads finish before evidence persistence.
             # The live GitHub selector then holds a short revision lock until the
@@ -183,6 +212,19 @@ class InvestigationService:
                 },
             )
             support_artifacts: list[EvidenceArtifactRecord] = []
+            observability_artifacts: list[EvidenceArtifactRecord] = []
+            if prometheus_evidence is not None:
+                observability_artifacts.append(
+                    self._add_artifact(
+                        run.id,
+                        kind="prometheus_metric_snapshot",
+                        source_uri=prometheus_evidence.source_uri,
+                        payload=prometheus_evidence.model_dump(
+                            mode="json",
+                            exclude={"source_uri"},
+                        ),
+                    )
+                )
             if any(
                 event.get("upstream_dependency") for event in telemetry.get("recent_events", [])
             ):
@@ -319,6 +361,10 @@ class InvestigationService:
                 *(str(artifact.id) for artifact in support_artifacts),
                 *(str(cluster.id) for cluster in cluster_records),
             ]
+            cause_evidence_ids = [
+                *common_evidence_ids,
+                *(str(artifact.id) for artifact in observability_artifacts),
+            ]
             for rank, candidate in enumerate(ranked_commits[:3], start=1):
                 self.session.add(
                     CommitCandidateRecord(
@@ -337,7 +383,11 @@ class InvestigationService:
                     )
                 )
 
-            cause_candidates = self.cause_ranker.rank(telemetry, ranked_commits)
+            cause_candidates = self.cause_ranker.rank(
+                telemetry,
+                ranked_commits,
+                prometheus_evidence,
+            )
             for candidate in cause_candidates[:3]:
                 self.session.add(
                     CauseCandidateRecord(
@@ -348,7 +398,7 @@ class InvestigationService:
                         rank=candidate.rank,
                         score=candidate.score,
                         explanation=candidate.explanation,
-                        evidence_ids=common_evidence_ids,
+                        evidence_ids=cause_evidence_ids,
                     )
                 )
 
@@ -406,6 +456,10 @@ class InvestigationService:
                             runbook_corpus.content_hash,
                             *(artifact.content_hash for artifact in provider_artifacts),
                             *(artifact.content_hash for artifact in support_artifacts),
+                            *(
+                                artifact.content_hash
+                                for artifact in observability_artifacts
+                            ),
                         ]
                     ),
                 }
@@ -671,5 +725,10 @@ def build_investigation_service(
         commit_ranker=CommitRanker(),
         cause_ranker=CauseRanker(),
         runbook_retriever=RunbookRetriever(settings.runbook_directory),
+        prometheus_provider=TenantPrometheusEvidenceProvider(
+            session,
+            organization_id,
+            mode=settings.prometheus_evidence_mode,
+        ),
         organization_id=organization_id,
     )

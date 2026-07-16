@@ -83,7 +83,7 @@ def test_empty_github_evidence_migration_round_trips_on_sqlite(tmp_path: Path) -
         engine = create_engine(database_url)
         signature = github_schema_signature(engine)
 
-        assert signature["revision"] == "20260716_0009"
+        assert signature["revision"] == "20260716_0010"
         assert "github_webhook_deliveries" in signature["tables"]
         assert signature["columns"] == (
             "id",
@@ -129,7 +129,7 @@ def test_empty_github_evidence_migration_round_trips_on_sqlite(tmp_path: Path) -
             )
 
         command.upgrade(config, "head")
-        assert github_schema_signature(engine)["revision"] == "20260716_0009"
+        assert github_schema_signature(engine)["revision"] == "20260716_0010"
     finally:
         settings.database_url = previous_url
         if engine is not None:
@@ -210,7 +210,7 @@ def test_upgrade_disables_and_audits_populated_phase9a_github_connector(
                 )
             )
 
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260716_0009")
 
         migrated_metadata = MetaData()
         migrated_connectors = Table(
@@ -286,7 +286,7 @@ def test_github_evidence_migration_refuses_nonempty_downgrade_before_ddl(
     try:
         settings.database_url = database_url
         config = migration_config()
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260716_0009")
         engine = create_engine(database_url)
         metadata = MetaData()
         connectors = Table("connectors", metadata, autoload_with=engine)

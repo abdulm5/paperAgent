@@ -177,6 +177,6 @@ def test_provider_contract_rejects_http_outside_local_even_when_origin_is_listed
     with pytest.raises(ConnectorContractError, match="HTTPS"):
         validate_configuration(
             ConnectorProvider.PROMETHEUS,
-            {"base_url": "http://prometheus:9090"},
+            {"service": "checkout-api", "base_url": "http://prometheus:9090"},
             production_settings,
         )

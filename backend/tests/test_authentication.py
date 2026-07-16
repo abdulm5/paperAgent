@@ -208,6 +208,7 @@ def test_production_configuration_rejects_development_identity_defaults() -> Non
     assert "PAGERAGENT_CONNECTOR_MASTER_KEY" in message
     assert "PAGERAGENT_CONNECTOR_KEY_VERSION" in message
     assert "GITHUB_EVIDENCE_MODE" in message
+    assert "PROMETHEUS_EVIDENCE_MODE" in message
 
 
 def test_github_request_budget_must_cover_bounded_pages_and_one_token_refresh() -> None:
@@ -228,6 +229,27 @@ def test_github_request_budget_must_cover_bounded_pages_and_one_token_refresh() 
     assert config.github_max_api_requests == 23
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {
+            "PROMETHEUS_MAX_WINDOW_SECONDS": 60,
+            "PROMETHEUS_QUERY_STEP_SECONDS": 300,
+        },
+        {
+            "PROMETHEUS_MAX_WINDOW_SECONDS": 1_800,
+            "PROMETHEUS_QUERY_STEP_SECONDS": 15,
+            "PROMETHEUS_MAX_SAMPLES": 100,
+        },
+    ],
+)
+def test_prometheus_query_limits_must_form_a_complete_bounded_window(
+    overrides: dict[str, int],
+) -> None:
+    with pytest.raises(ValidationError, match="PROMETHEUS_"):
+        Settings(_env_file=None, **overrides)
+
+
 def test_production_configuration_accepts_complete_fail_closed_identity_settings() -> None:
     config = Settings(
         _env_file=None,
@@ -243,6 +265,7 @@ def test_production_configuration_accepts_complete_fail_closed_identity_settings
         PAGERAGENT_CONNECTOR_KEY_VERSION="production-v1",
         PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS="https://api.github.com",
         GITHUB_EVIDENCE_MODE="connector",
+        PROMETHEUS_EVIDENCE_MODE="connector",
         PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS="https://telemetry.example.com",
         backend_cors_origins="https://pageragent.example.com",
     )

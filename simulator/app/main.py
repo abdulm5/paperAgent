@@ -145,6 +145,12 @@ def get_prometheus_metrics() -> str:
             "# HELP checkout_error_rate Fraction of checkout requests returning errors.",
             "# TYPE checkout_error_rate gauge",
             f"checkout_error_rate {snapshot.error_rate:.6f}",
+            "# HELP http_server_error_rate Server error fraction used by incident alerts.",
+            "# TYPE http_server_error_rate gauge",
+            (
+                'http_server_error_rate{service="checkout-api"} '
+                f"{snapshot.error_rate:.6f}"
+            ),
             "# HELP checkout_latency_p95_ms Simulated p95 checkout latency in milliseconds.",
             "# TYPE checkout_latency_p95_ms gauge",
             f"checkout_latency_p95_ms {snapshot.p95_latency_ms:.2f}",

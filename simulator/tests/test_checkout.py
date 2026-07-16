@@ -68,6 +68,7 @@ def test_prometheus_metrics_and_reset_expose_current_state() -> None:
 
     assert 'checkout_requests_total{status="failure"} 1' in metrics.text
     assert "checkout_error_rate 1.000000" in metrics.text
+    assert 'http_server_error_rate{service="checkout-api"} 1.000000' in metrics.text
     assert reset.json()["active_release"] == "stable-v1"
     assert telemetry["request_count"] == 0
 

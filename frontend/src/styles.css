@@ -636,6 +636,54 @@ h1, h2 { font-family: Iowan Old Style, "Palatino Linotype", Palatino, Georgia, s
 
 .investigation-run-meta time { color: var(--utility); }
 
+.signal-coverage {
+  display: grid;
+  grid-template-columns: 165px minmax(0, 1fr);
+  margin-top: 17px;
+  border: 1px solid var(--line-dark);
+  background: #edf1f3;
+}
+
+.signal-coverage > header {
+  display: grid;
+  gap: 5px;
+  align-content: center;
+  padding: 13px 14px;
+  border-right: 1px solid var(--line-dark);
+  background: var(--ink);
+  color: white;
+}
+
+.signal-coverage > header span {
+  color: #b9c8d1;
+  font: 700 0.48rem "SFMono-Regular", Consolas, monospace;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.signal-coverage > header strong { font-size: 0.74rem; }
+.signal-coverage dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; }
+
+.signal-channel {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  align-content: start;
+  min-width: 0;
+  padding: 11px 13px 10px 16px;
+  border-right: 1px solid var(--line);
+}
+
+.signal-channel:last-child { border-right: 0; }
+.signal-channel::before { position: absolute; top: 12px; left: 7px; width: 4px; height: 4px; border: 1px solid var(--utility); border-radius: 50%; content: ""; }
+.signal-channel.collected::before { border-color: var(--teal); background: var(--teal); box-shadow: 0 0 0 3px rgba(37, 109, 104, 0.14); }
+.signal-channel dt { color: var(--utility); font: 750 0.49rem "SFMono-Regular", Consolas, monospace; letter-spacing: 0.05em; text-transform: uppercase; }
+.signal-channel dd { margin: 0; color: var(--utility); font-size: 0.66rem; font-weight: 650; }
+.signal-channel.collected dd:not(.signal-channel-detail, .signal-channel-citations) { color: var(--ink); }
+.signal-channel .signal-channel-detail { overflow: hidden; font: 0.5rem "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.signal-channel .signal-channel-citations { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.signal-channel-citations span { padding: 2px 4px; border: 1px solid var(--line-dark); background: var(--paper); color: var(--teal); font: 700 0.47rem "SFMono-Regular", Consolas, monospace; }
+
 .cluster-strip {
   display: grid;
   grid-template-columns: 125px minmax(0, 1fr) auto;
@@ -762,12 +810,15 @@ h1, h2 { font-family: Iowan Old Style, "Palatino Linotype", Palatino, Georgia, s
 .provenance-drawer article strong { font-size: 0.68rem; }
 .provenance-drawer article small { overflow: hidden; color: var(--utility); font-size: 0.59rem; text-overflow: ellipsis; white-space: nowrap; }
 .provenance-drawer article > code { color: var(--utility); font-size: 0.58rem; }
-.github-provenance-receipt { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 2px 0 4px; border: 1px solid var(--line-dark); background: var(--teal-pale); }
-.github-provenance-receipt > div { display: grid; gap: 3px; min-width: 0; padding: 8px 10px; border-right: 1px solid var(--line); }
-.github-provenance-receipt > div:nth-child(4), .github-provenance-receipt > div:last-child { border-right: 0; }
-.github-provenance-receipt .github-provenance-source, .github-provenance-receipt .github-provenance-hash { grid-column: span 2; border-top: 1px solid var(--line); }
-.github-provenance-receipt dt { color: var(--rust); font: 750 0.47rem "SFMono-Regular", Consolas, monospace; letter-spacing: 0.045em; text-transform: uppercase; }
-.github-provenance-receipt dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--ink-soft); font: 0.56rem "SFMono-Regular", Consolas, monospace; }
+.provider-provenance-receipt { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 2px 0 4px; border: 1px solid var(--line-dark); background: var(--teal-pale); }
+.provider-provenance-receipt > div { display: grid; gap: 3px; min-width: 0; padding: 8px 10px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.provider-provenance-receipt > div:nth-child(4n), .provider-provenance-receipt > div:last-child { border-right: 0; }
+.provider-provenance-receipt .provider-provenance-wide { grid-column: span 2; }
+.provider-provenance-receipt .provider-provenance-full { grid-column: 1 / -1; border-right: 0; }
+.provider-provenance-receipt dt { color: var(--rust); font: 750 0.47rem "SFMono-Regular", Consolas, monospace; letter-spacing: 0.045em; text-transform: uppercase; }
+.provider-provenance-receipt dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--ink-soft); font: 0.56rem "SFMono-Regular", Consolas, monospace; }
+.prometheus-provenance-receipt { background: #e8eef1; box-shadow: inset 3px 0 var(--teal); }
+.prometheus-provenance-receipt dt { color: var(--teal); }
 .investigation-error { margin: 12px 0 0; color: var(--rust); font-size: 0.72rem; }
 
 .proposal-panel {
@@ -1206,6 +1257,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .evidence-tape { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .evidence-cell:nth-child(2) { border-right: 0; }
   .evidence-cell:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
+  .signal-coverage { grid-template-columns: 140px minmax(0, 1fr); }
   .operator-action { grid-template-columns: 1fr; align-items: stretch; }
   .operator-action > .authority-note { grid-column: 1; }
   .action-error { grid-column: 1; }
@@ -1324,6 +1376,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .investigation-empty, .investigation-heading, .cluster-strip { align-items: stretch; grid-template-columns: 1fr; }
   .investigation-empty { flex-direction: column; }
   .investigation-run-meta { flex-wrap: wrap; }
+  .signal-coverage { grid-template-columns: 1fr; }
+  .signal-coverage > header { border-right: 0; border-bottom: 1px solid var(--line-dark); }
+  .signal-coverage dl { grid-template-columns: 1fr; }
+  .signal-channel { border-right: 0; border-bottom: 1px solid var(--line); }
+  .signal-channel:last-child { border-bottom: 0; }
   .cluster-count { padding-bottom: 12px; border-right: 0; border-bottom: 1px solid #c79686; }
   .causal-stack { grid-template-columns: 1fr; }
   .causal-stack > div { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -1332,9 +1389,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .candidate-title-row strong { white-space: normal; }
   .provenance-drawer article { grid-template-columns: 58px minmax(0, 1fr); }
   .provenance-drawer article > code { grid-column: 2; }
-  .github-provenance-receipt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .github-provenance-receipt > div:nth-child(even) { border-right: 0; }
-  .github-provenance-receipt .github-provenance-source, .github-provenance-receipt .github-provenance-hash { grid-column: 1 / -1; border-right: 0; }
+  .provider-provenance-receipt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .provider-provenance-receipt > div:nth-child(even) { border-right: 0; }
+  .provider-provenance-receipt .provider-provenance-wide, .provider-provenance-receipt .provider-provenance-full { grid-column: 1 / -1; border-right: 0; }
   .proposal-empty, .proposal-heading { align-items: stretch; flex-direction: column; }
   .proposal-meta { justify-items: start; }
   .brief-lead { grid-template-columns: 1fr; }

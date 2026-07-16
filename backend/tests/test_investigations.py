@@ -8,6 +8,11 @@ from sqlalchemy.orm import Session
 
 from app.api.routes.investigations import get_investigation_service
 from app.domain.github import GitEvidenceBundle, GitWebhookReceipt
+from app.domain.prometheus import (
+    PrometheusEvidenceBundle,
+    PrometheusSample,
+    PrometheusSeries,
+)
 from app.evaluation.investigations import (
     InvestigationGroundTruth,
     evaluate_investigation,
@@ -104,6 +109,7 @@ def build_service(
     session: Session,
     *,
     git_provider: GitProvider | None = None,
+    prometheus_provider: object | None = None,
 ) -> InvestigationService:
     return InvestigationService(
         session=session,
@@ -114,6 +120,7 @@ def build_service(
         commit_ranker=CommitRanker(),
         cause_ranker=CauseRanker(),
         runbook_retriever=RunbookRetriever(REPOSITORY_ROOT / "runbooks"),
+        prometheus_provider=prometheus_provider,
     )
 
 
@@ -191,6 +198,77 @@ class GitHubArtifactProvider:
         )
 
 
+class PrometheusArtifactProvider:
+    version = "prometheus-artifact-test-v1"
+
+    def __init__(self, calls: list[str] | None = None) -> None:
+        self.calls = calls if calls is not None else []
+
+    def collect_evidence(
+        self,
+        *,
+        metric_name: str,
+        service: str,
+        observed_at: datetime,
+        window_seconds: int,
+    ) -> PrometheusEvidenceBundle:
+        self.calls.append("prometheus.collect")
+        assert metric_name == "http_server_error_rate"
+        assert service == "checkout-api"
+        assert window_seconds == 300
+        connector_id = UUID("33333333-3333-4333-8333-333333333333")
+        return PrometheusEvidenceBundle(
+            provider_version="prometheus-http-api-v1",
+            catalog_version="prometheus-query-catalog-v1",
+            query_id="alert.http-server-error-rate.v1",
+            metric_name=metric_name,
+            service=service,
+            window_started_at=observed_at - timedelta(seconds=window_seconds),
+            window_ended_at=observed_at,
+            step_seconds=15,
+            series_count=1,
+            sample_count=2,
+            series=[
+                PrometheusSeries(
+                    labels={"service": service},
+                    samples=[
+                        PrometheusSample(
+                            observed_at=observed_at - timedelta(seconds=15),
+                            value=0.11,
+                        ),
+                        PrometheusSample(observed_at=observed_at, value=0.13),
+                    ],
+                )
+            ],
+            source_uri=f"prometheus://connector/{connector_id}/{service}",
+            connector_id=connector_id,
+            connector_version=5,
+            credential_version=3,
+        )
+
+    def lock_current_revision(self, evidence: PrometheusEvidenceBundle | None) -> None:
+        assert evidence is not None
+        self.calls.append("prometheus.lock")
+
+
+class OrderedFixtureGitProvider:
+    version = "ordered-fixture-git-v1"
+
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
+    def collect_evidence(
+        self,
+        deployed_at: datetime,
+        service: str,
+        active_commit_sha: str,
+    ) -> GitEvidenceBundle:
+        self.calls.append("git.collect")
+        return FixtureGitProvider(
+            REPOSITORY_ROOT / "scenarios/checkout-commits.json"
+        ).collect_evidence(deployed_at, service, active_commit_sha)
+
+
 def test_investigation_persists_normalized_github_artifacts_with_traceable_provenance(
     db_session: Session,
 ) -> None:
@@ -241,6 +319,46 @@ def test_investigation_persists_normalized_github_artifacts_with_traceable_prove
         }
     }
     assert provider_evidence_ids.issubset(result.commit_candidates[0].evidence_ids)
+
+
+def test_prometheus_snapshot_is_fenced_hashed_cited_and_used_as_corroboration(
+    db_session: Session,
+) -> None:
+    incident_id = UUID(
+        TestClient(app).post("/api/v1/alerts", json=alert_payload()).json()["incident"]["id"]
+    )
+    calls: list[str] = []
+    prometheus = PrometheusArtifactProvider(calls)
+
+    result = build_service(
+        db_session,
+        git_provider=OrderedFixtureGitProvider(calls),
+        prometheus_provider=prometheus,
+    ).run(incident_id)
+
+    assert calls == ["prometheus.collect", "git.collect", "prometheus.lock"]
+    artifact = next(
+        item for item in result.evidence if item.kind == "prometheus_metric_snapshot"
+    )
+    assert artifact.source_uri == (
+        "prometheus://connector/33333333-3333-4333-8333-333333333333/checkout-api"
+    )
+    assert artifact.payload["query_id"] == "alert.http-server-error-rate.v1"
+    assert artifact.payload["catalog_version"] == "prometheus-query-catalog-v1"
+    assert artifact.payload["connector_version"] == 5
+    assert artifact.payload["credential_version"] == 3
+    assert artifact.payload["series_count"] == 1
+    assert artifact.payload["sample_count"] == 2
+    assert "query" not in artifact.payload
+    assert "source_uri" not in artifact.payload
+    assert len(artifact.content_hash) == 64
+    assert str(artifact.id) in result.cause_candidates[0].evidence_ids
+    assert str(artifact.id) not in result.commit_candidates[0].evidence_ids
+    assert str(artifact.id) not in result.runbook_matches[0].evidence_ids
+    assert (
+        "The bounded Prometheus error-rate window independently corroborates the "
+        "structured failure signal."
+    ) in result.cause_candidates[0].explanation
 
 
 def test_investigation_is_reproducible_and_updates_incident_timeline(

@@ -47,7 +47,8 @@ implement later.
 
 Phase 9A validation proves provider-schema correctness and authenticated vault round-tripping. It
 does not claim an external GitHub, Prometheus, or Slack handshake; those network adapters arrive in
-the subsequent Phase 9 slices.
+the subsequent Phase 9 slices. Phase 9B now supplies the GitHub handshake and Phase 9C.1 supplies
+the bounded Prometheus handshake; this paragraph records the narrower Phase 9A decision point.
 
 ## Alternatives considered
 

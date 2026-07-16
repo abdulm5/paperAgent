@@ -94,6 +94,11 @@ class GithubConfiguration(PublicMutationModel):
 
 
 class PrometheusConfiguration(PublicMutationModel):
+    service: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$",
+    )
     base_url: str = Field(min_length=1, max_length=500)
 
 
@@ -109,6 +114,17 @@ class GithubCredentials(PublicMutationModel):
 
 class PrometheusCredentials(PublicMutationModel):
     bearer_token: SecretStr = Field(min_length=1, max_length=8_192)
+
+    @field_validator("bearer_token")
+    @classmethod
+    def reject_ambiguous_bearer_tokens(cls, value: SecretStr) -> SecretStr:
+        token = value.get_secret_value()
+        contains_control_character = any(
+            ord(character) < 32 or ord(character) == 127 for character in token
+        )
+        if token != token.strip() or contains_control_character:
+            raise ValueError("Prometheus bearer token contains forbidden whitespace or controls")
+        return value
 
 
 class SlackCredentials(PublicMutationModel):

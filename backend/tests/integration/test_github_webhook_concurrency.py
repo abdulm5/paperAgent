@@ -168,37 +168,56 @@ def test_postgres_concurrent_exact_delivery_retry_creates_one_inbox_row() -> Non
             session.commit()
 
 
-def test_postgres_serializes_competing_github_service_enables() -> None:
+@pytest.mark.parametrize(
+    "provider",
+    [ConnectorProvider.GITHUB, ConnectorProvider.PROMETHEUS],
+)
+def test_postgres_serializes_competing_provider_service_enables(
+    provider: ConnectorProvider,
+) -> None:
     assert engine.dialect.name == "postgresql", (
         "PAGERAGENT_INTEGRATION_TESTS=1 requires DATABASE_URL to target PostgreSQL"
     )
     connector_ids = [uuid4(), uuid4()]
     with SessionLocal() as session:
         for index, connector_id in enumerate(connector_ids):
-            sealed = build_credential_cipher().seal(
+            plaintext_credentials = (
                 {
                     "private_key": "integration-private-key",
                     "webhook_secret": "integration-webhook-secret-with-32-bytes",
-                },
+                }
+                if provider is ConnectorProvider.GITHUB
+                else {"bearer_token": "integration-prometheus-token"}
+            )
+            sealed = build_credential_cipher().seal(
+                plaintext_credentials,
                 CredentialContext(
                     organization_id=DEFAULT_ORGANIZATION_ID,
                     connector_id=connector_id,
-                    provider=ConnectorProvider.GITHUB,
+                    provider=provider,
                     credential_version=1,
                 ),
             )
-            connector = ConnectorRecord(
-                id=connector_id,
-                organization_id=DEFAULT_ORGANIZATION_ID,
-                name=f"Competing GitHub connector {connector_id}",
-                provider="github",
-                configuration={
+            configuration = (
+                {
                     "service": "checkout-api",
                     "repository": f"pageragent/concurrency-{index}",
                     "app_id": 1001,
                     "installation_id": 2002 + index,
                     "api_url": "https://api.github.com",
-                },
+                }
+                if provider is ConnectorProvider.GITHUB
+                else {
+                    "service": "checkout-api",
+                    "base_url": "http://prometheus:9090",
+                }
+            )
+            connector = ConnectorRecord(
+                id=connector_id,
+                organization_id=DEFAULT_ORGANIZATION_ID,
+                name=f"Competing {provider.value} connector {connector_id}",
+                provider=provider.value,
+                configuration=configuration,
                 enabled=False,
                 status="disabled",
                 version=1,

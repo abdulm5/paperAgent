@@ -21,6 +21,29 @@ interface GitHubAppProvenance {
   credentialVersion: string | null;
 }
 
+interface PrometheusProvenance {
+  providerVersion: string;
+  catalogVersion: string;
+  service: string;
+  queryId: string;
+  windowStartedAt: string;
+  windowEndedAt: string;
+  seriesCount: number;
+  sampleCount: number;
+  truncated: boolean;
+  connectorVersion: number;
+  credentialVersion: number;
+  sourceUri: string;
+  contentHash: string;
+}
+
+const SERVICE_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/;
+const QUERY_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,99}$/;
+const VERSION_PATTERN = /^[a-z0-9][a-z0-9._-]{0,99}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const ZONED_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+
 function receiptScalar(value: unknown): string | null {
   return typeof value === "string" || typeof value === "number" ? String(value) : null;
 }
@@ -36,6 +59,127 @@ function githubAppProvenance(artifact: EvidenceArtifact): GitHubAppProvenance | 
     connectorVersion: receiptScalar(artifact.payload.connector_version),
     credentialVersion: receiptScalar(artifact.payload.credential_version),
   };
+}
+
+function boundedReceiptString(
+  value: unknown,
+  pattern: RegExp,
+  maximumLength: number,
+): string | null {
+  return typeof value === "string" && value.length <= maximumLength && pattern.test(value)
+    ? value
+    : null;
+}
+
+function receiptInteger(value: unknown, minimum: number, maximum: number): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= maximum
+    ? value
+    : null;
+}
+
+function utcReceiptTimestamp(value: unknown): { iso: string; milliseconds: number } | null {
+  if (
+    typeof value !== "string" ||
+    value.length > 40 ||
+    !ZONED_TIMESTAMP_PATTERN.test(value)
+  ) return null;
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) return null;
+  return {
+    iso: new Date(milliseconds).toISOString().replace(".000Z", "Z"),
+    milliseconds,
+  };
+}
+
+function sanitizedPrometheusSource(
+  artifact: EvidenceArtifact,
+  service: string,
+  connectorId: string,
+): string | null {
+  const expected = `prometheus://connector/${connectorId}/${service}`;
+  return artifact.source_uri === expected ? expected : null;
+}
+
+function prometheusProvenance(artifact: EvidenceArtifact): PrometheusProvenance | null {
+  if (artifact.kind !== "prometheus_metric_snapshot" || artifact.payload.provider !== "prometheus") {
+    return null;
+  }
+
+  const service = boundedReceiptString(artifact.payload.service, SERVICE_PATTERN, 100);
+  const queryId = boundedReceiptString(artifact.payload.query_id, QUERY_ID_PATTERN, 100);
+  const providerVersion = boundedReceiptString(
+    artifact.payload.provider_version,
+    VERSION_PATTERN,
+    100,
+  );
+  const catalogVersion = boundedReceiptString(
+    artifact.payload.catalog_version,
+    VERSION_PATTERN,
+    100,
+  );
+  const connectorId = boundedReceiptString(artifact.payload.connector_id, UUID_PATTERN, 36);
+  const connectorVersion = receiptInteger(artifact.payload.connector_version, 1, Number.MAX_SAFE_INTEGER);
+  const credentialVersion = receiptInteger(artifact.payload.credential_version, 1, Number.MAX_SAFE_INTEGER);
+  const seriesCount = receiptInteger(artifact.payload.series_count, 0, 10_000);
+  const sampleCount = receiptInteger(artifact.payload.sample_count, 0, 1_000_000);
+  const windowStartedAt = utcReceiptTimestamp(artifact.payload.window_started_at);
+  const windowEndedAt = utcReceiptTimestamp(artifact.payload.window_ended_at);
+  const contentHash = SHA256_PATTERN.test(artifact.content_hash) ? artifact.content_hash : null;
+  const truncated = typeof artifact.payload.truncated === "boolean"
+    ? artifact.payload.truncated
+    : null;
+
+  if (
+    !service ||
+    !queryId ||
+    !providerVersion ||
+    !catalogVersion ||
+    !connectorId ||
+    connectorVersion === null ||
+    credentialVersion === null ||
+    seriesCount === null ||
+    sampleCount === null ||
+    !windowStartedAt ||
+    !windowEndedAt ||
+    windowStartedAt.milliseconds > windowEndedAt.milliseconds ||
+    truncated === null ||
+    !contentHash
+  ) {
+    return null;
+  }
+
+  const sourceUri = sanitizedPrometheusSource(artifact, service, connectorId);
+  if (!sourceUri) return null;
+
+  return {
+    providerVersion,
+    catalogVersion,
+    service,
+    queryId,
+    windowStartedAt: windowStartedAt.iso,
+    windowEndedAt: windowEndedAt.iso,
+    seriesCount,
+    sampleCount,
+    truncated,
+    connectorVersion,
+    credentialVersion,
+    sourceUri,
+    contentHash,
+  };
+}
+
+function artifactSource(artifact: EvidenceArtifact): string {
+  if (artifact.kind !== "prometheus_metric_snapshot") return artifact.source_uri;
+  const service = boundedReceiptString(artifact.payload.service, SERVICE_PATTERN, 100);
+  const connectorId = boundedReceiptString(artifact.payload.connector_id, UUID_PATTERN, 36);
+  if (!service || !connectorId) return "Prometheus source withheld";
+  return sanitizedPrometheusSource(artifact, service, connectorId) ?? "Prometheus source withheld";
+}
+
+function artifactHashPreview(artifact: EvidenceArtifact): string {
+  return SHA256_PATTERN.test(artifact.content_hash)
+    ? artifact.content_hash.slice(0, 12)
+    : "Hash unavailable";
 }
 
 export function InvestigationPanel({
@@ -79,6 +223,9 @@ export function InvestigationPanel({
   const primaryCluster = investigation.error_clusters[0];
   const topCause = investigation.cause_candidates[0];
   const topRunbook = investigation.runbook_matches[0];
+  const metricArtifacts = investigation.evidence.filter(
+    (artifact) => prometheusProvenance(artifact) !== null,
+  );
   const paymentMethods = primaryCluster?.affected_attributes.payment_methods;
   const cohort = Array.isArray(paymentMethods) ? paymentMethods.join(", ") : "unknown cohort";
 
@@ -105,6 +252,44 @@ export function InvestigationPanel({
         message="The preserved investigation remains readable; rerunning evidence collection is not granted."
         permission="investigations.run"
       />
+
+      <section
+        aria-labelledby="signal-coverage-title"
+        className="signal-coverage"
+      >
+        <header>
+          <span>Cross-signal inputs</span>
+          <strong id="signal-coverage-title">Signal coverage</strong>
+        </header>
+        <dl>
+          <div className={metricArtifacts.length > 0 ? "signal-channel collected" : "signal-channel"}>
+            <dt>Metrics</dt>
+            <dd>{metricArtifacts.length > 0
+              ? `${metricArtifacts.length} snapshot${metricArtifacts.length === 1 ? "" : "s"}`
+              : "Not collected"}</dd>
+            <dd className="signal-channel-detail">
+              {metricArtifacts.length > 0 ? "Bounded Prometheus range" : "No immutable artifact"}
+            </dd>
+            {metricArtifacts.length > 0 ? (
+              <dd className="signal-channel-citations">
+                {metricArtifacts.slice(0, 4).map((artifact) => (
+                  <span key={artifact.id}>{citation(artifact.id)}</span>
+                ))}
+              </dd>
+            ) : null}
+          </div>
+          <div className="signal-channel">
+            <dt>Logs</dt>
+            <dd>Not collected</dd>
+            <dd className="signal-channel-detail">No immutable artifact</dd>
+          </div>
+          <div className="signal-channel">
+            <dt>Traces</dt>
+            <dd>Not collected</dd>
+            <dd className="signal-channel-detail">No immutable artifact</dd>
+          </div>
+        </dl>
+      </section>
 
       {primaryCluster ? (
         <div className="cluster-strip">
@@ -231,18 +416,19 @@ export function InvestigationPanel({
         <div>
           {investigation.evidence.map((artifact) => {
             const githubReceipt = githubAppProvenance(artifact);
+            const prometheusReceipt = prometheusProvenance(artifact);
             return (
               <article key={artifact.id}>
                 <span>{citation(artifact.id)}</span>
                 <div>
                   <strong>{titleCase(artifact.kind)}</strong>
-                  <small>{artifact.source_uri}</small>
+                  <small>{artifactSource(artifact)}</small>
                 </div>
-                <code>{artifact.content_hash.slice(0, 12)}</code>
+                <code>{artifactHashPreview(artifact)}</code>
                 {githubReceipt ? (
                   <dl
                     aria-label="GitHub App provenance receipt"
-                    className="github-provenance-receipt"
+                    className="provider-provenance-receipt"
                     role="region"
                   >
                     <div>
@@ -265,13 +451,81 @@ export function InvestigationPanel({
                         <dd>v{githubReceipt.credentialVersion}</dd>
                       </div>
                     ) : null}
-                    <div className="github-provenance-source">
+                    <div className="provider-provenance-wide">
                       <dt>Source</dt>
                       <dd>{artifact.source_uri}</dd>
                     </div>
-                    <div className="github-provenance-hash">
+                    <div className="provider-provenance-wide">
                       <dt>Content hash</dt>
                       <dd>{artifact.content_hash}</dd>
+                    </div>
+                  </dl>
+                ) : null}
+                {prometheusReceipt ? (
+                  <dl
+                    aria-label="Prometheus provenance receipt"
+                    className="provider-provenance-receipt prometheus-provenance-receipt"
+                    role="region"
+                  >
+                    <div>
+                      <dt>Provider</dt>
+                      <dd>Prometheus HTTP API</dd>
+                    </div>
+                    <div>
+                      <dt>Provider version</dt>
+                      <dd>{prometheusReceipt.providerVersion}</dd>
+                    </div>
+                    <div>
+                      <dt>Catalog version</dt>
+                      <dd>{prometheusReceipt.catalogVersion}</dd>
+                    </div>
+                    <div>
+                      <dt>Service</dt>
+                      <dd>{prometheusReceipt.service}</dd>
+                    </div>
+                    <div>
+                      <dt>Query ID</dt>
+                      <dd>{prometheusReceipt.queryId}</dd>
+                    </div>
+                    <div>
+                      <dt>Truncated</dt>
+                      <dd>{prometheusReceipt.truncated ? "Yes" : "No"}</dd>
+                    </div>
+                    <div>
+                      <dt>Series</dt>
+                      <dd>{prometheusReceipt.seriesCount}</dd>
+                    </div>
+                    <div>
+                      <dt>Samples</dt>
+                      <dd>{prometheusReceipt.sampleCount}</dd>
+                    </div>
+                    <div>
+                      <dt>Connector version</dt>
+                      <dd>v{prometheusReceipt.connectorVersion}</dd>
+                    </div>
+                    <div>
+                      <dt>Credential version</dt>
+                      <dd>v{prometheusReceipt.credentialVersion}</dd>
+                    </div>
+                    <div className="provider-provenance-wide">
+                      <dt>UTC window</dt>
+                      <dd>
+                        <time dateTime={prometheusReceipt.windowStartedAt}>
+                          {prometheusReceipt.windowStartedAt}
+                        </time>
+                        {" → "}
+                        <time dateTime={prometheusReceipt.windowEndedAt}>
+                          {prometheusReceipt.windowEndedAt}
+                        </time>
+                      </dd>
+                    </div>
+                    <div className="provider-provenance-wide">
+                      <dt>Source</dt>
+                      <dd>{prometheusReceipt.sourceUri}</dd>
+                    </div>
+                    <div className="provider-provenance-full">
+                      <dt>Content hash</dt>
+                      <dd>{prometheusReceipt.contentHash}</dd>
                     </div>
                   </dl>
                 ) : null}

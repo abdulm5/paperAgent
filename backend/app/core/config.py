@@ -112,6 +112,52 @@ class Settings(BaseSettings):
         le=168,
         validation_alias="GITHUB_EVIDENCE_LOOKBACK_HOURS",
     )
+    prometheus_evidence_mode: Literal["off", "auto", "connector"] = Field(
+        default="auto",
+        validation_alias="PROMETHEUS_EVIDENCE_MODE",
+    )
+    prometheus_http_timeout_seconds: float = Field(
+        default=6.0,
+        gt=0,
+        le=30,
+        validation_alias="PROMETHEUS_HTTP_TIMEOUT_SECONDS",
+    )
+    prometheus_max_response_bytes: int = Field(
+        default=1_048_576,
+        ge=1_024,
+        le=4_194_304,
+        validation_alias="PROMETHEUS_MAX_RESPONSE_BYTES",
+    )
+    prometheus_max_series: int = Field(
+        default=50,
+        ge=1,
+        le=100,
+        validation_alias="PROMETHEUS_MAX_SERIES",
+    )
+    prometheus_max_samples: int = Field(
+        default=2_000,
+        ge=1,
+        le=10_000,
+        validation_alias="PROMETHEUS_MAX_SAMPLES",
+    )
+    prometheus_max_labels_per_series: int = Field(
+        default=16,
+        ge=1,
+        le=32,
+        validation_alias="PROMETHEUS_MAX_LABELS_PER_SERIES",
+    )
+    prometheus_max_window_seconds: int = Field(
+        default=1_800,
+        ge=60,
+        le=21_600,
+        validation_alias="PROMETHEUS_MAX_WINDOW_SECONDS",
+    )
+    prometheus_query_step_seconds: int = Field(
+        default=15,
+        ge=15,
+        le=300,
+        validation_alias="PROMETHEUS_QUERY_STEP_SECONDS",
+    )
     investigation_telemetry_allowed_origins: str = Field(
         default="",
         validation_alias="PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS",
@@ -256,6 +302,17 @@ class Settings(BaseSettings):
                 "GITHUB_MAX_API_REQUESTS is too small for the configured bounded "
                 "GitHub evidence pages and one authentication refresh"
             )
+        if self.prometheus_query_step_seconds > self.prometheus_max_window_seconds:
+            raise ValueError(
+                "PROMETHEUS_QUERY_STEP_SECONDS must fit inside the maximum query window"
+            )
+        minimum_prometheus_samples = (
+            self.prometheus_max_window_seconds // self.prometheus_query_step_seconds
+        ) + 1
+        if self.prometheus_max_samples < minimum_prometheus_samples:
+            raise ValueError(
+                "PROMETHEUS_MAX_SAMPLES must hold at least one complete bounded series"
+            )
 
         if self.environment.lower() in {"local", "test"}:
             return self
@@ -317,6 +374,10 @@ class Settings(BaseSettings):
             errors.append(
                 "PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS must include https://api.github.com "
                 "when GitHub connector evidence is enabled"
+            )
+        if self.prometheus_evidence_mode != "connector":
+            errors.append(
+                "PROMETHEUS_EVIDENCE_MODE must be 'connector' outside local/test environments"
             )
 
         telemetry_origins = [

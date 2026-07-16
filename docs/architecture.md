@@ -35,8 +35,8 @@ The LLM is deliberately downstream of evidence gathering. It can summarize, comp
 | Component | Current responsibility | Later responsibility |
 | --- | --- | --- |
 | `simulator/` | Reproduce code, configuration, and upstream-dependency failures | Add production-like distributed services |
-| `backend/` | Authenticate identities, enforce organization membership and RBAC, custody typed connector credentials, authenticate/bound GitHub evidence, persist incidents and workflows, relay a transactional outbox, execute database-leased jobs, rank causes, validate grounded briefs, enforce approval policy, verify recovery, and version postmortems | Add observability and collaboration adapters |
-| PostgreSQL | Own connector metadata, encrypted credential envelopes, custody events, verified GitHub delivery receipts, incident state, workflows, leases, results, and unpublished outbox messages | Move to a managed high-availability deployment |
+| `backend/` | Authenticate identities, enforce organization membership and RBAC, custody typed connector credentials, collect bounded GitHub and Prometheus evidence, persist incidents and workflows, relay a transactional outbox, execute database-leased jobs, rank causes, validate grounded briefs, enforce approval policy, verify recovery, and version postmortems | Add backend-specific log/trace and collaboration adapters |
+| PostgreSQL | Own connector metadata, encrypted credential envelopes, custody events, verified GitHub delivery receipts, content-hashed evidence, incident state, workflows, leases, results, and unpublished outbox messages | Move to a managed high-availability deployment |
 | Redis Streams | Wake workers with at-least-once delivery, consumer groups, pending-message reclaim, and a dead-letter stream | Move to a managed transport and tune retention |
 | `frontend/` | Present the signed organization scope, exact permission receipt, connector custody ledger, evidence, causal rankings, evaluation gates, workflow delivery receipts, recovery receipts, and postmortem document control | Add membership administration |
 | `runbooks/` | Supply versioned procedures to hybrid retrieval | Source grounded mitigation steps |
@@ -77,10 +77,17 @@ wrapped by an exact-version key-encryption key. Authenticated associated data bi
 its organization, connector, provider, revision, and key identifier, so copied or edited rows fail
 closed. API responses and allowlisted audit payloads reveal field presence and revision only.
 The Phase 9A generic validation checked provider schema and vault integrity without making an
-external request. Phase 9B's GitHub-specific validator now snapshots the connector and credential
-revision, ends the database transaction, performs a bounded App-installation/repository handshake,
-then locks and records the result only if both revisions are still current. Prometheus and Slack
-remain local-only contracts until their own vertical slices.
+external request. GitHub and Prometheus validators now snapshot the connector and credential
+revision, end the database transaction, perform their bounded provider handshake, then lock and
+record the result only if both revisions are still current. Slack remains a local-only contract
+until its own vertical slice.
+
+Prometheus connector origins must exactly match the server allowlist; requests append only fixed
+API paths, reject redirects, ignore environment proxies, and use ordinary TLS verification.
+Unlike the older telemetry-source policy, this adapter does not pre-resolve or pin DNS answers.
+Exact origin validation is not a complete SSRF boundary: production deployment must enforce egress
+policy that permits the intended Prometheus destination and blocks metadata or unrelated internal
+destinations.
 
 GitHub webhooks use a separate public authentication boundary. The connector UUID routes the
 delivery but does not authenticate it. PagerAgent caps the raw request, verifies
@@ -99,13 +106,12 @@ Each worker claim locks the job row, records a worker identity and expiring leas
 The evidence layer stores collection snapshots as content-hashed artifacts and stores derived clusters, causal candidates, commit candidates, and runbook matches separately. Each investigation captures its collector, clusterer, ranker, and retriever versions plus an input hash. Each derived record carries evidence identifiers, so a score can be traced back to telemetry, dependency health, configuration history, deploy history, commit metadata, and the runbook corpus.
 
 Provider interfaces isolate evidence collection from analysis. The default local demo uses HTTP
-telemetry, a fixture-backed Git provider, and local Markdown runbooks. In connector mode, a
-tenant-and-service selector decrypts exactly one enabled GitHub App envelope at the adapter
-boundary and replaces the fixture catalog with bounded normalized REST snapshots and verified
-webhook receipts without changing the deterministic ranking contract. After network I/O it locks
-and compare-and-swaps the connector plus credential revisions through evidence commit, discarding
-results collected across a completed revocation or rotation. Non-local environments must select
-connector mode and never silently fall back to fixtures.
+telemetry, optional bounded Prometheus corroboration, a fixture-backed Git provider, and local
+Markdown runbooks. Tenant-and-service selectors decrypt exactly one enabled provider envelope at
+the adapter boundary. After network I/O they lock and compare-and-swap connector plus credential
+revisions through evidence commit, discarding results collected across a completed revocation or
+rotation. Non-local environments require connector modes and never silently substitute fixtures
+for configured provider evidence.
 
 The synthesis provider is also replaceable. With an API key, the OpenAI adapter uses the Responses API and a strict structured-output schema. Without a key, the deterministic provider creates the same typed contract for offline demos. Both outputs pass through the same citation validator. The model produces language only; a deterministic policy derives the action envelope from the top causal signal and matching safety runbook.
 
@@ -294,6 +300,33 @@ are capped, and rate-limit/provider errors are sanitized for the existing durabl
 Telemetry remains the operational observation of the active release. GitHub metadata corroborates
 which changes, pull requests, deployments, and releases surround that observation; it does not
 override recovery gates or create mitigation authority.
+
+## Phase 9C.1 Prometheus evidence path
+
+```text
+incident organization + service + alert metric
+        │ one enabled tenant/service Prometheus connector
+        ▼
+decrypt bearer envelope → snapshot connector + credential revisions → end DB transaction
+        │ fixed server-owned query ID; fixed POST path; time/byte/series/sample/label bounds
+        ▼
+normalized matrix + sanitized internal source URI
+        │ after all network reads, lock order is GitHub then Prometheus
+        ▼
+compare exact revisions → content-hashed prometheus_metric_snapshot → evidence commit
+        │
+        └──► at most +0.01 corroboration for an existing non-unknown cause
+```
+
+The current catalog supports only the alert's `http_server_error_rate` metric. The incident cannot
+supply PromQL, and the response cannot introduce unapproved labels, native histograms, non-finite
+values, duplicate series, or samples outside its server-derived window. The final connector lock
+is held through artifact and ranking persistence, so a completed revocation invalidates stale
+provider data without holding a database lock during network I/O.
+
+This is a Prometheus metrics slice, not a generic OpenTelemetry query implementation. Logs and
+traces require explicit backend APIs and their own authentication, pagination, redaction, and
+resource-limit contracts.
 
 New connectors begin disabled. A successful custody validation records a receipt but does not
 silently enable the connector; the administrator makes that state transition explicitly with the

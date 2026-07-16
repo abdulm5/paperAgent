@@ -28,12 +28,27 @@ class StubGitHubProvider:
     def validate(self) -> None:
         return None
 
+    def close(self) -> None:
+        return None
+
+
+class StubPrometheusProvider:
+    def validate(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
 
 @pytest.fixture(autouse=True)
 def stub_github_provider_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.services.connectors.build_github_provider",
         lambda _configuration, _credentials: StubGitHubProvider(),
+    )
+    monkeypatch.setattr(
+        "app.services.connectors.build_prometheus_provider",
+        lambda _configuration, _credentials: StubPrometheusProvider(),
     )
 
 
@@ -58,6 +73,23 @@ def github_connector(
             "private_key": secret,
             "webhook_secret": WEBHOOK_SECRET,
         },
+    }
+
+
+def prometheus_connector(
+    *,
+    name: str = "Checkout metrics",
+    service: str = "checkout-api",
+    token: str = SECRET_SENTINEL,
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "provider": "prometheus",
+        "configuration": {
+            "service": service,
+            "base_url": "http://prometheus:9090",
+        },
+        "credentials": {"bearer_token": token},
     }
 
 
@@ -333,6 +365,47 @@ def test_provider_validation_discards_a_result_when_connector_changes_during_io(
     assert validation_events == []
 
 
+def test_prometheus_validation_discards_a_stale_handshake_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RacingPrometheusProvider:
+        def validate(self) -> None:
+            with TestingSessionLocal() as racing_session:
+                connector = racing_session.scalar(select(ConnectorRecord))
+                assert connector is not None
+                connector.name = "Changed during Prometheus handshake"
+                connector.version += 1
+                racing_session.commit()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "app.services.connectors.build_prometheus_provider",
+        lambda _configuration, _credentials: RacingPrometheusProvider(),
+    )
+    client = TestClient(app)
+    created = client.post("/api/v1/connectors", json=prometheus_connector()).json()
+
+    response = client.post(
+        f"/api/v1/connectors/{created['id']}/validate",
+        json={"expected_version": created["version"]},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["current_version"] == 2
+    with TestingSessionLocal() as verification_session:
+        connector = verification_session.scalar(select(ConnectorRecord))
+        assert connector is not None
+        assert connector.last_validation_ok is None
+        validation_events = verification_session.scalars(
+            select(ConnectorAuditEventRecord).where(
+                ConnectorAuditEventRecord.event_type == "connector.validation_completed"
+            )
+        ).all()
+    assert validation_events == []
+
+
 @pytest.mark.parametrize(
     ("payload", "credential_field"),
     [
@@ -340,7 +413,10 @@ def test_provider_validation_discards_a_result_when_connector_changes_during_io(
             {
                 "name": "Metrics",
                 "provider": "prometheus",
-                "configuration": {"base_url": "http://prometheus:9090"},
+                "configuration": {
+                    "service": "checkout-api",
+                    "base_url": "http://prometheus:9090",
+                },
                 "credentials": {"bearer_token": "prom-token"},
             },
             "bearer_token",
@@ -368,6 +444,77 @@ def test_provider_contracts_accept_prometheus_and_slack(
     assert response.status_code == 201
     assert response.json()["credential_fields"] == [credential_field]
     assert str(payload["credentials"]) not in response.text
+
+
+def test_prometheus_connector_requires_live_validation_and_unique_service_binding() -> None:
+    client = TestClient(app)
+    first = client.post(
+        "/api/v1/connectors",
+        json=prometheus_connector(name="Primary checkout metrics"),
+    ).json()
+
+    validated_response = client.post(
+        f"/api/v1/connectors/{first['id']}/validate",
+        json={"expected_version": first["version"]},
+    )
+    assert validated_response.status_code == 200
+    validated = validated_response.json()
+    assert validated["last_validation_ok"] is True
+    assert "Prometheus read-only query handshake passed" in validated[
+        "last_validation_message"
+    ]
+    enabled_response = client.patch(
+        f"/api/v1/connectors/{first['id']}",
+        json={"expected_version": validated["version"], "enabled": True},
+    )
+    assert enabled_response.status_code == 200
+
+    second = client.post(
+        "/api/v1/connectors",
+        json=prometheus_connector(name="Duplicate checkout metrics", token="second-token"),
+    ).json()
+    second = client.post(
+        f"/api/v1/connectors/{second['id']}/validate",
+        json={"expected_version": second["version"]},
+    ).json()
+    conflict = client.patch(
+        f"/api/v1/connectors/{second['id']}",
+        json={"expected_version": second["version"], "enabled": True},
+    )
+
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == (
+        "Another enabled Prometheus connector already owns this service binding"
+    )
+
+
+def test_failed_prometheus_handshake_is_sanitized_and_disables_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingPrometheusProvider:
+        def validate(self) -> None:
+            raise RuntimeError(f"provider body contained {SECRET_SENTINEL}")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "app.services.connectors.build_prometheus_provider",
+        lambda _configuration, _credentials: FailingPrometheusProvider(),
+    )
+    client = TestClient(app)
+    created = client.post("/api/v1/connectors", json=prometheus_connector()).json()
+
+    response = client.post(
+        f"/api/v1/connectors/{created['id']}/validate",
+        json={"expected_version": created["version"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["last_validation_ok"] is False
+    assert response.json()["enabled"] is False
+    assert SECRET_SENTINEL not in response.text
+    assert "provider body" not in response.text
 
 
 @pytest.mark.parametrize(

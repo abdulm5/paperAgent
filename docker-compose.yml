@@ -45,6 +45,7 @@ services:
       AUTO_GENERATE_POSTMORTEMS: "true"
       DURABLE_MITIGATION_ENABLED: "true"
       GITHUB_EVIDENCE_MODE: "${GITHUB_EVIDENCE_MODE:-auto}"
+      PROMETHEUS_EVIDENCE_MODE: "${PROMETHEUS_EVIDENCE_MODE:-auto}"
       CHECKOUT_CONTROL_URL: http://checkout-api:8100
       PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS: http://checkout-api:8100
     ports:
@@ -62,6 +63,8 @@ services:
       postgres:
         condition: service_healthy
       checkout-api:
+        condition: service_healthy
+      prometheus:
         condition: service_healthy
 
   outbox-relay:
@@ -98,6 +101,7 @@ services:
       COMMIT_FIXTURE_PATH: /scenarios/checkout-commits.json
       SCENARIO_DIRECTORY: /scenarios
       GITHUB_EVIDENCE_MODE: "${GITHUB_EVIDENCE_MODE:-auto}"
+      PROMETHEUS_EVIDENCE_MODE: "${PROMETHEUS_EVIDENCE_MODE:-auto}"
       CHECKOUT_CONTROL_URL: http://checkout-api:8100
       PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS: http://checkout-api:8100
     volumes:
@@ -110,6 +114,8 @@ services:
       redis:
         condition: service_healthy
       checkout-api:
+        condition: service_healthy
+      prometheus:
         condition: service_healthy
 
   checkout-api:
@@ -126,6 +132,28 @@ services:
       retries: 10
     volumes:
       - ./simulator:/app
+
+  prometheus:
+    image: prom/prometheus:v3.12.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=1h
+      - --query.timeout=10s
+      - --query.max-concurrency=4
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      checkout-api:
+        condition: service_healthy
 
   alert-evaluator:
     build:
@@ -187,4 +215,5 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  prometheus-data:
   frontend-node-modules:

@@ -59,7 +59,7 @@ Phase 9A reserves typed, non-secret configuration and credential fields:
 | Provider | Non-secret configuration | Write-only credentials |
 | --- | --- | --- |
 | GitHub | repository, app ID, installation ID, optional approved API origin | App private key |
-| Prometheus | approved base origin | Bearer token |
+| Prometheus | service binding, approved base origin | Bearer token |
 | Slack | channel, optional approved API origin | Bot token |
 
 The validation action decrypts the envelope and rechecks this contract. Its receipt explicitly says
@@ -68,8 +68,9 @@ connectivity.
 
 > Historical boundary: Phase 9B extends the GitHub row with an explicit service binding and
 > write-only webhook secret, fixes the runtime to GitHub's public API origin, and replaces this
-> local-only GitHub receipt with a real installation/repository handshake. Prometheus and Slack
-> still use the Phase 9A behavior.
+> local-only GitHub receipt with a real installation/repository handshake. Phase 9C.1 likewise
+> adds a Prometheus service binding, a fixed live query handshake, and bounded metric evidence.
+> Slack still uses the original Phase 9A behavior.
 
 ## Demo walkthrough
 
@@ -84,17 +85,21 @@ connectivity.
 8. Switch organizations and verify that the connector ledger clears and the known UUID returns
    `404`.
 
-The dedicated connector demo script performs the same API sequence and checks that the submitted
-token never appears in any response or audit payload.
+The dedicated connector demo script performs the same API sequence, checks that the submitted
+token never appears in any response or audit payload, and now completes the fixed Phase 9C.1 live
+Prometheus read handshake before enablement.
 
 ## Deferred Phase 9 slices
 
 - **9B (complete):** multiline-safe GitHub App private-key ingress, installation authorization,
   signed webhook verification, delivery replay protection, and real commit/deployment evidence
-- **9C:** bounded Prometheus/OpenTelemetry queries and immutable evidence snapshots
+- **9C.1 (complete):** bounded Prometheus range evidence and immutable snapshots
+- **9C.2:** backend-specific log and trace evidence
 - **9D:** durable Slack updates and GitHub issue creation with downstream idempotency
 - **9E:** provider-specific OIDC authorization-code/PKCE login and membership administration
 
-Every networked adapter must add DNS/IP checks, private/link-local/metadata blocking, redirect
-refusal, egress policy, and connect/response limits before using a stored origin. Exact root-origin
-validation in 9A is a control-plane prerequisite, not a complete runtime SSRF defense.
+Every networked adapter must add redirect refusal, connect/response limits, and an enforceable
+outbound boundary before using a stored origin. Phase 9C.1 relies on exact origin allowlisting plus
+deployment egress policy; a future application transport may instead pin validated DNS answers.
+Exact root-origin validation in 9A is a control-plane prerequisite, not a complete runtime SSRF
+defense.

@@ -8,9 +8,10 @@ usage() {
   cat <<'EOF'
 Usage: ./scripts/run-connector-demo.sh [--no-build]
 
-Exercise the Phase 9A connector custody boundary without contacting a provider:
-create disabled, prove API redaction and role/tenant isolation, validate, enable,
-rotate back to disabled, validate again, and print the append-only audit receipt.
+Exercise connector custody and the Phase 9C.1 Prometheus handshake:
+create disabled, prove API redaction and role/tenant isolation, run the fixed
+read-only provider query, enable, rotate back to disabled, validate again, and
+print the append-only audit receipt.
 
 Options:
   --no-build    Reuse the current Docker images.
@@ -173,7 +174,10 @@ token = input()
 print(json.dumps({
     "name": name,
     "provider": "prometheus",
-    "configuration": {"base_url": "http://prometheus:9090"},
+    "configuration": {
+        "service": "checkout-api",
+        "base_url": "http://prometheus:9090",
+    },
     "credentials": {"bearer_token": token},
 }))
 ')"
@@ -194,7 +198,7 @@ assert_absent "$detail$events" "$first_token" "Commander read receipt"
 [[ "$(response_status "$sandbox_admin_token" GET "/api/v1/connectors/$connector_id")" == "404" ]] \
   || fail "A cross-organization connector ID did not return 404."
 
-echo "Validating the local provider contract and authenticated vault envelope..."
+echo "Validating the live Prometheus read handshake and authenticated vault envelope..."
 validated="$(api_request "$admin_token" POST "/api/v1/connectors/$connector_id/validate" \
   "{\"expected_version\":$version}")"
 assert_absent "$validated" "$first_token" "Validation response"
@@ -296,7 +300,7 @@ if token in ciphertext or token in wrapped_key:
 '
 [[ "$credential_version" == "2" ]] || fail "Stored credential revision is not 2."
 
-printf '\nPhase 9A custody proof complete\n'
+printf '\nConnector custody and Prometheus handshake proof complete\n'
 printf '  Connector: %s (%s)\n' "$connector_name" "$connector_id"
 printf '  Current state: enabled, connector version %s\n' "$version"
 printf '  Credential receipt: revision %s, wrapping key %s\n' \
@@ -313,5 +317,5 @@ import sys
 
 print(" -> ".join(item["event_type"] for item in json.load(sys.stdin)))
 '
-printf '  Provider handshake: intentionally pending (no network request in Phase 9A)\n'
+printf '  Provider handshake: fixed read-only Prometheus query passed\n'
 printf '  Dashboard: http://localhost:5173\n'

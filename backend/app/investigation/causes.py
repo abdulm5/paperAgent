@@ -1,16 +1,18 @@
 from typing import Any
 
 from app.domain.evaluations import CausalKind, CauseCandidate
+from app.domain.prometheus import PrometheusEvidenceBundle
 from app.investigation.commits import RankedCommit
 
 
 class CauseRanker:
-    version = "causal-signal-ranker-v1"
+    version = "causal-signal-ranker-v2"
 
     def rank(
         self,
         telemetry: dict[str, Any],
         commits: list[RankedCommit],
+        prometheus_evidence: PrometheusEvidenceBundle | None = None,
     ) -> list[CauseCandidate]:
         failures = [
             event
@@ -96,5 +98,43 @@ class CauseRanker:
                 )
             )
 
+        if self._prometheus_corroborates_failures(telemetry, prometheus_evidence):
+            candidates = [
+                candidate.model_copy(
+                    update={
+                        "score": min(1.0, candidate.score + 0.01),
+                        "explanation": [
+                            *candidate.explanation,
+                            (
+                                "The bounded Prometheus error-rate window independently "
+                                "corroborates the structured failure signal."
+                            ),
+                        ],
+                    }
+                )
+                if candidate.kind is not CausalKind.UNKNOWN
+                else candidate
+                for candidate in candidates
+            ]
+
         ranked = sorted(candidates, key=lambda item: item.score, reverse=True)
         return [item.model_copy(update={"rank": rank}) for rank, item in enumerate(ranked, 1)]
+
+    @staticmethod
+    def _prometheus_corroborates_failures(
+        telemetry: dict[str, Any],
+        evidence: PrometheusEvidenceBundle | None,
+    ) -> bool:
+        if evidence is None or evidence.metric_name != "http_server_error_rate":
+            return False
+        try:
+            structured_error_rate = float(telemetry.get("error_rate", 0.0))
+        except (TypeError, ValueError):
+            return False
+        values = [sample.value for series in evidence.series for sample in series.samples]
+        if structured_error_rate <= 0 or not values:
+            return False
+        # Prometheus scrape timing need not align exactly with the event snapshot.
+        # Treat the independent signal as a bounded confidence adjustment only
+        # when its peak reaches at least 75% of the structured error rate.
+        return max(values) >= structured_error_rate * 0.75

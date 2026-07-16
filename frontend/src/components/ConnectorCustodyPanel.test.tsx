@@ -190,6 +190,48 @@ test("creates the selected provider contract with a blank-after-submit secret in
   expect(document.body).not.toHaveTextContent("xoxb-ui-sentinel");
 });
 
+test("includes the service binding in a write-only Prometheus connector contract", async () => {
+  const bearerToken = "prometheus-ui-token-sentinel";
+  render(<ConnectorCustodyPanel session={adminSession} />);
+  await screen.findByRole("heading", { name: connector.name });
+
+  fireEvent.click(screen.getByRole("button", { name: "New contract" }));
+  const form = screen.getByRole("heading", { name: "Declare a provider contract." }).closest("form");
+  expect(form).not.toBeNull();
+  const createForm = within(form!);
+  fireEvent.change(createForm.getByLabelText("Connector name"), {
+    target: { value: "Checkout metrics evidence" },
+  });
+  fireEvent.change(createForm.getByLabelText("Provider"), { target: { value: "prometheus" } });
+  fireEvent.change(createForm.getByLabelText(/Service binding/), {
+    target: { value: "checkout-api" },
+  });
+  fireEvent.change(createForm.getByLabelText(/Base URL/), {
+    target: { value: "https://metrics.example.com" },
+  });
+  fireEvent.change(createForm.getByLabelText("Bearer token (bearer_token, write only)"), {
+    target: { value: bearerToken },
+  });
+  fireEvent.click(createForm.getByRole("button", { name: "Seal custody record" }));
+
+  await waitFor(() => {
+    expect(screen.queryByRole("heading", { name: "Declare a provider contract." })).not.toBeInTheDocument();
+  });
+  const createCall = vi.mocked(fetch).mock.calls.find(([input, init]) =>
+    String(input).endsWith("/connectors") && init?.method === "POST"
+  );
+  expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({
+    name: "Checkout metrics evidence",
+    provider: "prometheus",
+    configuration: {
+      service: "checkout-api",
+      base_url: "https://metrics.example.com",
+    },
+    credentials: { bearer_token: bearerToken },
+  });
+  expect(document.body).not.toHaveTextContent(bearerToken);
+});
+
 test("preserves an LF PEM exactly when sealing the current GitHub App contract", async () => {
   const privateKey = "-----BEGIN PRIVATE KEY-----\nline-one\nline-two\n-----END PRIVATE KEY-----\n";
   const webhookSecret = "github-webhook-secret-with-enough-entropy";
@@ -319,6 +361,43 @@ test("renders the sanitized GitHub handshake receipt and allows enablement only 
     screen.getByText("Validation receipt: Authenticated installation <84>; repository access confirmed."),
   ).toBeInTheDocument();
   expect(document.querySelector(".custody-validation script")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Enable connector" })).toBeEnabled();
+});
+
+test("renders a sanitized Prometheus handshake receipt", async () => {
+  const prometheusConnector: ConnectorDetail = {
+    ...connector,
+    provider: "prometheus",
+    name: "Checkout metrics evidence",
+    status: "configured",
+    configuration: {
+      service: "checkout-api",
+      base_url: "https://metrics.example.com",
+    },
+    credential_fields: ["bearer_token"],
+    last_validated_at: "2026-07-16T16:20:00Z",
+    last_validation_ok: true,
+    last_validation_message: "Prometheus query API and metric catalog are readable.",
+  };
+  vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.endsWith("/events")) return jsonResponse([auditEvent]);
+    if (path.endsWith(`/connectors/${prometheusConnector.id}`)) {
+      return jsonResponse(prometheusConnector);
+    }
+    if (path.endsWith("/connectors")) return jsonResponse([prometheusConnector]);
+    return jsonResponse(prometheusConnector);
+  });
+
+  render(<ConnectorCustodyPanel session={adminSession} />);
+
+  expect(await screen.findByText("Prometheus provider handshake succeeded.")).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      "Validation receipt: Prometheus query API and metric catalog are readable.",
+    ),
+  ).toBeInTheDocument();
+  expect(screen.getAllByText("checkout-api").length).toBeGreaterThan(0);
   expect(screen.getByRole("button", { name: "Enable connector" })).toBeEnabled();
 });
 

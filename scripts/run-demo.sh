@@ -191,12 +191,23 @@ cluster = result["error_clusters"][0]
 cause = result["cause_candidates"][0]
 commit = result["commit_candidates"][0]
 runbook = result["runbook_matches"][0]
+metric_snapshot = next(
+    (item for item in result["evidence"] if item["kind"] == "prometheus_metric_snapshot"),
+    None,
+)
 print("\nPagerAgent investigation complete")
 print("  Cluster: {} ({} failures)".format(cluster["error_type"], cluster["failure_count"]))
 print("  Cause: #{} {} / {} (score {:.4f})".format(cause["rank"], cause["kind"], cause["reference"], cause["score"]))
 print("  Deploy candidate: #{} {} (score {:.4f})".format(commit["rank"], commit["commit_sha"], commit["total_score"]))
 print("  Runbook: #{} {} (score {:.4f})".format(runbook["rank"], runbook["runbook_id"], runbook["total_score"]))
 print("  Evidence: {} immutable artifacts".format(len(result["evidence"])))
+if metric_snapshot:
+    payload = metric_snapshot["payload"]
+    print(
+        "  Prometheus: {} samples across {} series ({})".format(
+            payload["sample_count"], payload["series_count"], payload["query_id"]
+        )
+    )
 '
       echo "Open http://localhost:5173 to inspect citations and advance the response."
       investigation_complete=true

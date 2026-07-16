@@ -762,6 +762,12 @@ h1, h2 { font-family: Iowan Old Style, "Palatino Linotype", Palatino, Georgia, s
 .provenance-drawer article strong { font-size: 0.68rem; }
 .provenance-drawer article small { overflow: hidden; color: var(--utility); font-size: 0.59rem; text-overflow: ellipsis; white-space: nowrap; }
 .provenance-drawer article > code { color: var(--utility); font-size: 0.58rem; }
+.github-provenance-receipt { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 2px 0 4px; border: 1px solid var(--line-dark); background: var(--teal-pale); }
+.github-provenance-receipt > div { display: grid; gap: 3px; min-width: 0; padding: 8px 10px; border-right: 1px solid var(--line); }
+.github-provenance-receipt > div:nth-child(4), .github-provenance-receipt > div:last-child { border-right: 0; }
+.github-provenance-receipt .github-provenance-source, .github-provenance-receipt .github-provenance-hash { grid-column: span 2; border-top: 1px solid var(--line); }
+.github-provenance-receipt dt { color: var(--rust); font: 750 0.47rem "SFMono-Regular", Consolas, monospace; letter-spacing: 0.045em; text-transform: uppercase; }
+.github-provenance-receipt dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--ink-soft); font: 0.56rem "SFMono-Regular", Consolas, monospace; }
 .investigation-error { margin: 12px 0 0; color: var(--rust); font-size: 0.72rem; }
 
 .proposal-panel {
@@ -1070,7 +1076,7 @@ h1, h2 { font-family: Iowan Old Style, "Palatino Linotype", Palatino, Georgia, s
 .connector-form-grid label, .custody-controls label, .secret-envelope label { display: grid; gap: 6px; color: var(--utility); font-size: 0.58rem; font-weight: 750; letter-spacing: 0.045em; text-transform: uppercase; }
 .connector-form-grid label > span, .custody-controls label > span, .secret-envelope label > span { display: flex; justify-content: space-between; gap: 12px; }
 .connector-form-grid code, .custody-controls label code, .secret-envelope code { color: var(--teal); font-size: 0.53rem; font-weight: 500; letter-spacing: 0; text-transform: none; }
-.connector-form-grid input, .connector-form-grid select, .custody-controls input { width: 100%; min-height: 40px; padding: 9px 10px; border: 1px solid var(--line-dark); border-radius: 0; outline: 0; background: white; color: var(--ink); font: 0.73rem "Avenir Next", Avenir, sans-serif; }
+.connector-form-grid input, .connector-form-grid select, .custody-controls input, .custody-controls textarea { width: 100%; min-height: 40px; padding: 9px 10px; border: 1px solid var(--line-dark); border-radius: 0; outline: 0; background: white; color: var(--ink); font: 0.73rem "Avenir Next", Avenir, sans-serif; }
 .secret-envelope { position: relative; margin: 0; padding: 18px 19px 19px; border: 0; border-top: 1px dashed var(--line-dark); background: var(--ink); color: white; }
 .secret-envelope::before, .secret-envelope::after { position: absolute; top: -7px; width: 13px; height: 13px; border: 1px solid var(--line-dark); border-radius: 50%; background: #e8eef1; content: ""; }
 .secret-envelope::before { left: -7px; }
@@ -1079,7 +1085,8 @@ h1, h2 { font-family: Iowan Old Style, "Palatino Linotype", Palatino, Georgia, s
 .secret-envelope > p { margin: 0 0 13px; color: #b9c8d2; font-size: 0.66rem; }
 .secret-envelope > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .secret-envelope label { color: #ced9df; }
-.secret-envelope input { width: 100%; min-height: 40px; padding: 9px 10px; border: 1px solid #758795; background: #26394b; color: white; font: 0.73rem "SFMono-Regular", Consolas, monospace; }
+.secret-envelope input, .secret-envelope textarea { width: 100%; min-height: 40px; padding: 9px 10px; border: 1px solid #758795; border-radius: 0; background: #26394b; color: white; font: 0.73rem "SFMono-Regular", Consolas, monospace; }
+.secret-envelope textarea, .credential-rotation textarea { min-height: 132px; resize: vertical; tab-size: 2; white-space: pre; }
 .connector-create-ledger > footer { display: flex; justify-content: space-between; gap: 24px; align-items: center; padding: 12px 19px; border-top: 1px solid var(--line-dark); color: var(--utility); font: 0.54rem "SFMono-Regular", Consolas, monospace; text-transform: uppercase; }
 .connector-create-ledger > footer button, .custody-controls button, .custody-validation button { padding: 9px 12px; border: 1px solid var(--teal); background: var(--teal); color: white; cursor: pointer; font-size: 0.59rem; font-weight: 750; letter-spacing: 0.04em; text-transform: uppercase; }
 .connector-create-ledger button:disabled, .custody-controls button:disabled, .custody-validation button:disabled { cursor: not-allowed; opacity: 0.46; }
@@ -1150,12 +1157,13 @@ h1, h2 { font-family: Iowan Old Style, "Palatino Linotype", Palatino, Georgia, s
 .custody-button-row { display: flex; gap: 8px; align-items: center; margin-top: 2px; }
 .custody-button-row button:last-child { border-color: var(--rust); background: transparent; color: var(--rust); }
 .credential-rotation { background: #e6ecef; }
-.credential-rotation input { font-family: "SFMono-Regular", Consolas, monospace; }
+.credential-rotation input, .credential-rotation textarea { font-family: "SFMono-Regular", Consolas, monospace; }
 .credential-rotation > button { justify-self: start; }
 .custody-receipt > .authority-note { margin: 14px 19px; }
 
 .custody-validation { display: grid; grid-template-columns: minmax(0, 1fr) minmax(210px, 0.65fr); gap: 24px; align-items: center; padding: 18px 19px; border-bottom: 1px solid var(--line-dark); background: var(--teal-pale); }
 .custody-validation > div:first-child > p:last-child { margin: 6px 0 0; color: var(--ink-soft); font-size: 0.65rem; }
+.custody-validation .validation-server-message { display: block; margin-top: 6px; color: var(--teal); font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.57rem; overflow-wrap: anywhere; }
 .custody-validation > div:last-child { display: grid; gap: 8px; justify-items: end; }
 .custody-validation .authority-note { width: min(340px, 100%); }
 
@@ -1324,6 +1332,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .candidate-title-row strong { white-space: normal; }
   .provenance-drawer article { grid-template-columns: 58px minmax(0, 1fr); }
   .provenance-drawer article > code { grid-column: 2; }
+  .github-provenance-receipt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .github-provenance-receipt > div:nth-child(even) { border-right: 0; }
+  .github-provenance-receipt .github-provenance-source, .github-provenance-receipt .github-provenance-hash { grid-column: 1 / -1; border-right: 0; }
   .proposal-empty, .proposal-heading { align-items: stretch; flex-direction: column; }
   .proposal-meta { justify-items: start; }
   .brief-lead { grid-template-columns: 1fr; }

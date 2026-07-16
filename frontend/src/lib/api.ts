@@ -452,6 +452,7 @@ export interface ConnectorSummary {
   enabled: boolean;
   version: number;
   last_validated_at: string | null;
+  last_validation_ok: boolean | null;
   last_validation_message: string | null;
   updated_at: string;
 }

@@ -1,9 +1,19 @@
+import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
+
+GITHUB_OWNER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$"
 
 
 class ConnectorProvider(StrEnum):
@@ -54,10 +64,33 @@ class ConnectorValidateInput(PublicMutationModel):
 
 
 class GithubConfiguration(PublicMutationModel):
-    repository: str = Field(min_length=3, max_length=300, pattern=r"^[^/\s]+/[^/\s]+$")
+    service: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$",
+    )
+    repository: str = Field(
+        min_length=3,
+        max_length=201,
+        pattern=r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$",
+    )
     app_id: int = Field(gt=0)
     installation_id: int = Field(gt=0)
-    api_url: str | None = Field(default=None, min_length=1, max_length=500)
+    api_url: Literal["https://api.github.com"] = "https://api.github.com"
+
+    @field_validator("repository")
+    @classmethod
+    def reject_repository_dot_segments(cls, value: str) -> str:
+        owner, repository = value.split("/", 1)
+        if (
+            owner in {".", ".."}
+            or repository in {".", ".."}
+            or re.fullmatch(GITHUB_OWNER_PATTERN, owner) is None
+        ):
+            raise ValueError("GitHub repository contains a forbidden path segment")
+        # GitHub repository paths are case-insensitive. Persist one canonical
+        # form so REST paths, webhook bindings, and evidence queries agree.
+        return value.lower()
 
 
 class PrometheusConfiguration(PublicMutationModel):
@@ -71,6 +104,7 @@ class SlackConfiguration(PublicMutationModel):
 
 class GithubCredentials(PublicMutationModel):
     private_key: SecretStr = Field(min_length=1, max_length=65_536)
+    webhook_secret: SecretStr = Field(min_length=32, max_length=8_192)
 
 
 class PrometheusCredentials(PublicMutationModel):

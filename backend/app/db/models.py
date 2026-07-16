@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -96,6 +97,11 @@ class ConnectorRecord(Base):
     __table_args__ = (
         Index("ix_connectors_organization_created", "organization_id", "created_at"),
         UniqueConstraint("organization_id", "name", name="uq_connectors_organization_name"),
+        UniqueConstraint(
+            "organization_id",
+            "id",
+            name="uq_connectors_organization_id",
+        ),
         CheckConstraint(
             "provider IN ('github', 'prometheus', 'slack')",
             name="ck_connectors_provider",
@@ -221,6 +227,80 @@ class ConnectorAuditEventRecord(Base):
     )
 
     connector: Mapped[ConnectorRecord] = relationship(back_populates="events")
+
+
+class GithubWebhookDeliveryRecord(Base):
+    """Verified, normalized GitHub evidence; raw webhook bodies are never retained."""
+
+    __tablename__ = "github_webhook_deliveries"
+    __table_args__ = (
+        Index(
+            "ix_github_webhook_deliveries_organization_received",
+            "organization_id",
+            "received_at",
+        ),
+        Index(
+            "ix_github_webhook_deliveries_connector_repository_received",
+            "connector_id",
+            "repository",
+            "received_at",
+        ),
+        UniqueConstraint(
+            "connector_id",
+            "delivery_id",
+            name="uq_github_webhook_deliveries_connector_delivery",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "connector_id"],
+            ["connectors.organization_id", "connectors.id"],
+            name="fk_github_webhook_deliveries_tenant_connector",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "event_type IN ('push', 'pull_request', 'deployment', 'deployment_status', 'release')",
+            name="ck_github_webhook_deliveries_event_type",
+        ),
+        CheckConstraint(
+            "action IS NULL OR (length(action) >= 1 AND length(action) <= 32)",
+            name="ck_github_webhook_deliveries_action_length",
+        ),
+        CheckConstraint(
+            "length(delivery_id) = 36",
+            name="ck_github_webhook_deliveries_delivery_id_length",
+        ),
+        CheckConstraint(
+            "length(body_sha256) = 64",
+            name="ck_github_webhook_deliveries_body_hash_length",
+        ),
+        CheckConstraint(
+            "installation_id > 0",
+            name="ck_github_webhook_deliveries_installation_positive",
+        ),
+        CheckConstraint(
+            "connector_version > 0 AND credential_version > 0",
+            name="ck_github_webhook_deliveries_versions_positive",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    connector_id: Mapped[UUID] = mapped_column(
+        Uuid, nullable=False
+    )
+    delivery_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    action: Mapped[str | None] = mapped_column(String(32))
+    repository: Mapped[str] = mapped_column(String(201), nullable=False)
+    installation_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    connector_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    credential_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    body_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalized_payload: Mapped[dict[str, Any]] = mapped_column(json_document, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class IncidentRecord(Base):

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.auth.constants import DEFAULT_ORGANIZATION_ID, DEFAULT_ORGANIZATION_SLUG
 from app.auth.dependencies import get_current_principal
 from app.auth.permissions import permissions_for_role
+from app.connectors.vault import CredentialContext, SealedCredentials, build_credential_cipher
 from app.db.models import (
     ConnectorAuditEventRecord,
     ConnectorCredentialRecord,
@@ -15,27 +16,48 @@ from app.db.models import (
     OrganizationRecord,
 )
 from app.domain.auth import Principal, Role
+from app.domain.connectors import ConnectorProvider
 from app.main import app
-from tests.conftest import TEST_USER_ID
+from tests.conftest import TEST_USER_ID, TestingSessionLocal
 
 SECRET_SENTINEL = "connector-private-secret-sentinel"
+WEBHOOK_SECRET = "github-webhook-secret-with-at-least-32-bytes"
+
+
+class StubGitHubProvider:
+    def validate(self) -> None:
+        return None
+
+
+@pytest.fixture(autouse=True)
+def stub_github_provider_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.services.connectors.build_github_provider",
+        lambda _configuration, _credentials: StubGitHubProvider(),
+    )
 
 
 def github_connector(
     *,
     name: str = "Checkout GitHub",
     secret: str = SECRET_SENTINEL,
+    service: str = "checkout-api",
+    repository: str = "pageragent/checkout",
 ) -> dict[str, object]:
     return {
         "name": name,
         "provider": "github",
         "configuration": {
-            "repository": "pageragent/checkout",
+            "service": service,
+            "repository": repository,
             "app_id": 1001,
             "installation_id": 2002,
             "api_url": "https://api.github.com",
         },
-        "credentials": {"private_key": secret},
+        "credentials": {
+            "private_key": secret,
+            "webhook_secret": WEBHOOK_SECRET,
+        },
     }
 
 
@@ -68,7 +90,7 @@ def test_connector_lifecycle_is_versioned_disabled_by_default_and_never_returns_
     assert created["status"] == "disabled"
     assert created["version"] == 1
     assert created["credential_version"] == 1
-    assert created["credential_fields"] == ["private_key"]
+    assert created["credential_fields"] == ["private_key", "webhook_secret"]
     assert SECRET_SENTINEL not in client.get("/api/v1/connectors").text
     assert SECRET_SENTINEL not in client.get(
         f"/api/v1/connectors/{created['id']}"
@@ -80,7 +102,7 @@ def test_connector_lifecycle_is_versioned_disabled_by_default_and_never_returns_
     )
     assert premature_enable.status_code == 409
     assert premature_enable.json()["detail"] == (
-        "A connector must pass local validation before it can be enabled"
+        "A connector must pass its current validation before it can be enabled"
     )
 
     credential = db_session.scalar(select(ConnectorCredentialRecord))
@@ -99,7 +121,7 @@ def test_connector_lifecycle_is_versioned_disabled_by_default_and_never_returns_
     validated = validated_response.json()
     assert validated["version"] == 2
     assert validated["last_validation_ok"] is True
-    assert "provider handshake is pending" in validated["last_validation_message"]
+    assert "GitHub App installation" in validated["last_validation_message"]
     assert validated["status"] == "disabled"
 
     enabled_response = client.patch(
@@ -116,7 +138,10 @@ def test_connector_lifecycle_is_versioned_disabled_by_default_and_never_returns_
         f"/api/v1/connectors/{created['id']}/credentials",
         json={
             "expected_version": 3,
-            "credentials": {"private_key": "rotated-secret-sentinel"},
+            "credentials": {
+                "private_key": "rotated-secret-sentinel",
+                "webhook_secret": "rotated-webhook-secret-with-at-least-32-bytes",
+            },
         },
     )
     assert rotated_response.status_code == 200
@@ -143,6 +168,169 @@ def test_connector_lifecycle_is_versioned_disabled_by_default_and_never_returns_
     assert "rotated-secret-sentinel" not in events_response.text
     assert db_session.scalar(select(ConnectorAuditEventRecord)) is not None
     assert client.delete(f"/api/v1/connectors/{created['id']}").status_code == 405
+
+
+def test_multiline_github_pem_is_preserved_in_the_sealed_envelope_and_never_returned(
+    db_session: Session,
+) -> None:
+    multiline_pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\r\n"
+        "line-one\n"
+        "line-two\r\n"
+        "-----END RSA PRIVATE KEY-----\n"
+    )
+    payload = github_connector(secret=multiline_pem)
+
+    response = TestClient(app).post("/api/v1/connectors", json=payload)
+
+    assert response.status_code == 201
+    assert multiline_pem not in response.text
+    connector = db_session.scalar(select(ConnectorRecord))
+    credential = db_session.scalar(select(ConnectorCredentialRecord))
+    assert connector is not None
+    assert credential is not None
+    opened = build_credential_cipher().open(
+        SealedCredentials(
+            ciphertext=credential.ciphertext,
+            ciphertext_nonce=credential.ciphertext_nonce,
+            wrapped_data_key=credential.wrapped_data_key,
+            wrapped_key_nonce=credential.wrapped_key_nonce,
+            key_version=credential.key_version,
+            credential_field_names=tuple(credential.credential_field_names),
+        ),
+        CredentialContext(
+            organization_id=connector.organization_id,
+            connector_id=connector.id,
+            provider=ConnectorProvider.GITHUB,
+            credential_version=credential.credential_version,
+        ),
+    )
+    assert opened["private_key"] == multiline_pem
+    assert opened["webhook_secret"] == WEBHOOK_SECRET
+
+
+def test_github_repository_identity_is_canonicalized_and_supports_dot_names(
+    db_session: Session,
+) -> None:
+    response = TestClient(app).post(
+        "/api/v1/connectors",
+        json=github_connector(repository="PagerAgent/.GitHub"),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["configuration"]["repository"] == "pageragent/.github"
+    connector = db_session.scalar(select(ConnectorRecord))
+    assert connector is not None
+    assert connector.configuration["repository"] == "pageragent/.github"
+
+
+def test_failed_github_handshake_is_sanitized_and_cannot_enable_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingGitHubProvider:
+        def validate(self) -> None:
+            raise RuntimeError(f"provider body contained {SECRET_SENTINEL}")
+
+    monkeypatch.setattr(
+        "app.services.connectors.build_github_provider",
+        lambda _configuration, _credentials: FailingGitHubProvider(),
+    )
+    client = TestClient(app)
+    created = client.post("/api/v1/connectors", json=github_connector()).json()
+
+    response = client.post(
+        f"/api/v1/connectors/{created['id']}/validate",
+        json={"expected_version": created["version"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["last_validation_ok"] is False
+    assert response.json()["status"] == "invalid"
+    assert response.json()["enabled"] is False
+    assert SECRET_SENTINEL not in response.text
+    assert "provider body" not in response.text
+    assert (
+        client.patch(
+            f"/api/v1/connectors/{created['id']}",
+            json={"expected_version": response.json()["version"], "enabled": True},
+        ).status_code
+        == 409
+    )
+
+
+def test_only_one_enabled_github_connector_can_own_a_service_binding() -> None:
+    client = TestClient(app)
+    first = client.post("/api/v1/connectors", json=github_connector()).json()
+    first = client.post(
+        f"/api/v1/connectors/{first['id']}/validate",
+        json={"expected_version": first["version"]},
+    ).json()
+    first = client.patch(
+        f"/api/v1/connectors/{first['id']}",
+        json={"expected_version": first["version"], "enabled": True},
+    ).json()
+    assert first["enabled"] is True
+
+    second = client.post(
+        "/api/v1/connectors",
+        json=github_connector(
+            name="Second checkout repository",
+            repository="pageragent/checkout-worker",
+        ),
+    ).json()
+    second = client.post(
+        f"/api/v1/connectors/{second['id']}/validate",
+        json={"expected_version": second["version"]},
+    ).json()
+
+    conflict = client.patch(
+        f"/api/v1/connectors/{second['id']}",
+        json={"expected_version": second["version"], "enabled": True},
+    )
+
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == (
+        "Another enabled GitHub connector already owns this service binding"
+    )
+    assert client.get(f"/api/v1/connectors/{second['id']}").json()["enabled"] is False
+
+
+def test_provider_validation_discards_a_result_when_connector_changes_during_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RacingGitHubProvider:
+        def validate(self) -> None:
+            with TestingSessionLocal() as racing_session:
+                connector = racing_session.scalar(select(ConnectorRecord))
+                assert connector is not None
+                connector.name = "Changed during handshake"
+                connector.version += 1
+                racing_session.commit()
+
+    monkeypatch.setattr(
+        "app.services.connectors.build_github_provider",
+        lambda _configuration, _credentials: RacingGitHubProvider(),
+    )
+    client = TestClient(app)
+    created = client.post("/api/v1/connectors", json=github_connector()).json()
+
+    response = client.post(
+        f"/api/v1/connectors/{created['id']}/validate",
+        json={"expected_version": created["version"]},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["current_version"] == 2
+    with TestingSessionLocal() as verification_session:
+        connector = verification_session.scalar(select(ConnectorRecord))
+        assert connector is not None
+        assert connector.last_validation_ok is None
+        validation_events = verification_session.scalars(
+            select(ConnectorAuditEventRecord).where(
+                ConnectorAuditEventRecord.event_type == "connector.validation_completed"
+            )
+        ).all()
+    assert validation_events == []
 
 
 @pytest.mark.parametrize(
@@ -197,6 +385,7 @@ def test_provider_contracts_accept_prometheus_and_slack(
 def test_connector_urls_must_be_exact_allowlisted_origins(url: str) -> None:
     payload = github_connector()
     payload["configuration"] = {
+        "service": "checkout-api",
         "repository": "pageragent/checkout",
         "app_id": 1,
         "installation_id": 2,
@@ -207,6 +396,40 @@ def test_connector_urls_must_be_exact_allowlisted_origins(url: str) -> None:
 
     assert response.status_code == 422
     assert SECRET_SENTINEL not in response.text
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        "owner/../repository",
+        "owner/repository?token=secret",
+        "owner/repository#fragment",
+        "owner/%2e%2e",
+        "./repository",
+        "owner/..",
+        "owner/repository/extra",
+    ],
+)
+def test_github_repository_segments_are_safe_for_api_path_construction(
+    repository: str,
+) -> None:
+    response = TestClient(app).post(
+        "/api/v1/connectors",
+        json=github_connector(repository=repository),
+    )
+
+    assert response.status_code == 422
+    assert SECRET_SENTINEL not in response.text
+
+
+def test_github_connector_requires_an_explicit_service_binding() -> None:
+    payload = github_connector()
+    assert isinstance(payload["configuration"], dict)
+    payload["configuration"].pop("service")
+
+    response = TestClient(app).post("/api/v1/connectors", json=payload)
+
+    assert response.status_code == 422
 
 
 @pytest.mark.parametrize(
@@ -324,7 +547,10 @@ def test_cross_tenant_connector_ids_are_indistinguishable_from_missing(
             f"/api/v1/connectors/{created['id']}/credentials",
             json={
                 "expected_version": 1,
-                "credentials": {"private_key": "other-secret"},
+                "credentials": {
+                    "private_key": "other-secret",
+                    "webhook_secret": "other-webhook-secret-with-at-least-32-bytes",
+                },
             },
         ).status_code
         == 404
@@ -358,7 +584,10 @@ def test_incident_commander_can_read_but_only_admin_can_mutate_or_validate() -> 
             f"/api/v1/connectors/{created['id']}/credentials",
             json={
                 "expected_version": 1,
-                "credentials": {"private_key": "denied-secret"},
+                "credentials": {
+                    "private_key": "denied-secret",
+                    "webhook_secret": "denied-webhook-secret-with-at-least-32-bytes",
+                },
             },
         ).status_code
         == 403
@@ -404,7 +633,7 @@ def test_vault_tampering_marks_connector_invalid_without_exposing_details(
     assert response.json()["status"] == "invalid"
     assert response.json()["enabled"] is False
     assert response.json()["last_validation_ok"] is False
-    assert "provider handshake is pending" in response.json()["last_validation_message"]
+    assert "credential validation failed" in response.json()["last_validation_message"]
     assert "integrity" not in response.text.lower()
 
 

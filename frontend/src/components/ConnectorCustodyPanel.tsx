@@ -24,6 +24,7 @@ interface ContractField {
   label: string;
   hint: string;
   inputMode?: "text" | "url";
+  rendering?: "single-line" | "multiline";
 }
 
 interface ProviderContract {
@@ -38,12 +39,23 @@ const PROVIDER_CONTRACTS: Record<ConnectorProvider, ProviderContract> = {
     label: "GitHub App",
     noun: "repository evidence",
     configuration: [
+      { key: "service", label: "Service binding", hint: "checkout-api" },
       { key: "repository", label: "Repository", hint: "owner/repository" },
       { key: "app_id", label: "App ID", hint: "GitHub App identifier" },
       { key: "installation_id", label: "Installation ID", hint: "Organization installation" },
     ],
     credentials: [
-      { key: "private_key", label: "Private key", hint: "PEM-encoded GitHub App key" },
+      {
+        key: "private_key",
+        label: "Private key",
+        hint: "PEM-encoded GitHub App key",
+        rendering: "multiline",
+      },
+      {
+        key: "webhook_secret",
+        label: "Webhook secret",
+        hint: "GitHub webhook signing secret",
+      },
     ],
   },
   prometheus: {
@@ -145,6 +157,13 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
       ? detail.credential_fields
       : PROVIDER_CONTRACTS[detail.provider].credentials.map((field) => field.key);
   }, [detail]);
+  const rotationCredentialFields = useMemo(() => {
+    if (!detail) return [];
+    const currentContractFields = PROVIDER_CONTRACTS[detail.provider].credentials.map(
+      (field) => field.key,
+    );
+    return [...new Set([...declaredCredentialFields, ...currentContractFields])];
+  }, [declaredCredentialFields, detail]);
 
   const loadList = useCallback(async (
     preferredId?: string,
@@ -237,11 +256,12 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
     setEvents([]);
     setError(null);
     setActing(null);
+    setCreating(false);
     setLoading(false);
     setDetailLoading(false);
+    setCreateCredentials(emptyValues(PROVIDER_CONTRACTS[createProvider].credentials));
+    setRotationCredentials({});
     if (!canRead) {
-      setCreateCredentials(emptyValues(PROVIDER_CONTRACTS[createProvider].credentials));
-      setRotationCredentials({});
       return;
     }
     void loadList(undefined, session.active_organization.id);
@@ -277,8 +297,8 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
     if (!detail || !activeContract) return;
     setEditName(detail.name);
     setEditConfiguration(configurationValues(detail, activeContract.configuration));
-    setRotationCredentials(Object.fromEntries(declaredCredentialFields.map((field) => [field, ""])));
-  }, [activeContract, declaredCredentialFields, detail]);
+    setRotationCredentials(Object.fromEntries(rotationCredentialFields.map((field) => [field, ""])));
+  }, [activeContract, detail, rotationCredentialFields]);
 
   function changeCreateProvider(provider: ConnectorProvider) {
     setCreateProvider(provider);
@@ -394,7 +414,7 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
     setActing("credentials");
     setError(null);
     const submittedCredentials = { ...rotationCredentials };
-    setRotationCredentials(Object.fromEntries(declaredCredentialFields.map((field) => [field, ""])));
+    setRotationCredentials(Object.fromEntries(rotationCredentialFields.map((field) => [field, ""])));
     try {
       const updated = await rotateConnectorCredentials(
         target.id,
@@ -489,8 +509,8 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
           <h1 id="custody-title">Know what crosses the boundary.</h1>
         </div>
         <p>
-          Future provider adapters will contribute evidence and incident updates. PagerAgent first
-          records the public contract, seals credentials, and proves each custody change.
+          GitHub App connections now contribute repository evidence through a provider handshake.
+          PagerAgent records every public contract, sealed credential change, and validation receipt.
         </p>
       </header>
 
@@ -710,7 +730,7 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
                       <button
                         disabled={
                           acting !== null ||
-                          (!detail.enabled && (!detail.last_validated_at || detail.status === "invalid"))
+                          (!detail.enabled && detail.last_validation_ok !== true)
                         }
                         onClick={() => void handleToggleEnabled()}
                         type="button"
@@ -726,7 +746,7 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
                       <h3>Rotate sealed values</h3>
                     </header>
                     <p>Existing values cannot be viewed. Every field starts and returns blank.</p>
-                    {declaredCredentialFields.map((fieldKey) => {
+                    {rotationCredentialFields.map((fieldKey) => {
                       const field = activeContract.credentials.find((candidate) => candidate.key === fieldKey) ?? {
                         key: fieldKey,
                         label: titleCase(fieldKey),
@@ -759,11 +779,20 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
                   <p className="utility-label">Custody check</p>
                   <h3 id="validation-title">Validate without revealing.</h3>
                   <p>
-                    {detail.last_validated_at
-                      ? detail.status === "invalid"
-                        ? "The local custody check rejected this contract. Rotate or correct it before enabling."
-                        : "PagerAgent verified the local contract and sealed-envelope integrity; provider handshake remains pending."
-                      : "No validation receipt has been recorded."}
+                    {!detail.last_validated_at
+                      ? "No validation receipt has been recorded."
+                      : detail.last_validation_ok === false || detail.status === "invalid"
+                        ? "Validation failed. Rotate the credentials or correct the contract before enabling."
+                        : detail.last_validation_ok !== true
+                          ? "This legacy receipt does not attest to a successful validation. Validate again before enabling."
+                          : detail.provider === "github"
+                            ? "GitHub App provider handshake succeeded."
+                            : "PagerAgent verified the local contract and sealed-envelope integrity."}
+                    {detail.last_validation_message ? (
+                      <span className="validation-server-message">
+                        Validation receipt: {detail.last_validation_message}
+                      </span>
+                    ) : null}
                   </p>
                 </div>
                 <div>
@@ -776,7 +805,9 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
                   </button>
                   <AuthorityNote
                     allowed={canValidate}
-                    message="Only administrators can run the local contract and vault-integrity check."
+                    message={detail.provider === "github"
+                      ? "Only administrators can run the GitHub App handshake and vault-integrity check."
+                      : "Only administrators can run the local contract and vault-integrity check."}
                     permission="connectors.validate"
                   />
                 </div>
@@ -835,11 +866,37 @@ function ContractInput({ field, onChange, value }: FieldInputProps) {
 }
 
 function SecretInput({ field, onChange, value }: FieldInputProps) {
+  const accessibilityLabel = `${field.label} (${field.key}, write only)`;
+  if (field.rendering === "multiline") {
+    return (
+      <label>
+        <span>{field.label} <code>{field.key}</code></span>
+        <textarea
+          aria-label={accessibilityLabel}
+          autoComplete="new-password"
+          autoCapitalize="none"
+          onChange={(event) => onChange(event.target.value)}
+          onPaste={(event) => {
+            const pasted = event.clipboardData.getData("text/plain");
+            event.preventDefault();
+            const start = rawIndexForTextareaIndex(value, event.currentTarget.selectionStart ?? 0);
+            const end = rawIndexForTextareaIndex(value, event.currentTarget.selectionEnd ?? 0);
+            onChange(`${value.slice(0, start)}${pasted}${value.slice(end)}`);
+          }}
+          placeholder={field.hint}
+          required
+          rows={7}
+          spellCheck={false}
+          value={value}
+        />
+      </label>
+    );
+  }
   return (
     <label>
       <span>{field.label} <code>{field.key}</code></span>
       <input
-        aria-label={`${field.label} (${field.key}, write only)`}
+        aria-label={accessibilityLabel}
         autoComplete="new-password"
         autoCapitalize="none"
         onChange={(event) => onChange(event.target.value)}
@@ -851,4 +908,14 @@ function SecretInput({ field, onChange, value }: FieldInputProps) {
       />
     </label>
   );
+}
+
+function rawIndexForTextareaIndex(value: string, textareaIndex: number): number {
+  let rawIndex = 0;
+  let displayedIndex = 0;
+  while (rawIndex < value.length && displayedIndex < textareaIndex) {
+    rawIndex += value[rawIndex] === "\r" && value[rawIndex + 1] === "\n" ? 2 : 1;
+    displayedIndex += 1;
+  }
+  return rawIndex;
 }

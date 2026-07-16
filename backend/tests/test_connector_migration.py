@@ -54,7 +54,7 @@ def test_empty_connector_migration_round_trips_and_matches_orm_constraints(
     try:
         settings.database_url = database_url
         config = migration_config()
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260715_0008")
         engine = create_engine(database_url)
         signature = schema_signature(engine)
         assert signature["revision"] == "20260715_0008"
@@ -72,7 +72,7 @@ def test_empty_connector_migration_round_trips_and_matches_orm_constraints(
         assert "connector_credentials" not in downgraded_tables
         assert "connector_audit_events" not in downgraded_tables
 
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260715_0008")
         assert schema_signature(engine)["revision"] == "20260715_0008"
     finally:
         settings.database_url = previous_url
@@ -89,7 +89,7 @@ def test_connector_migration_refuses_nonempty_downgrade_before_any_ddl(
     try:
         settings.database_url = database_url
         config = migration_config()
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260715_0008")
         engine = create_engine(database_url)
         metadata = MetaData()
         connectors = Table("connectors", metadata, autoload_with=engine)

@@ -66,6 +66,11 @@ The validation action decrypts the envelope and rechecks this contract. Its rece
 that provider handshake is pending so a local schema check cannot be mistaken for production
 connectivity.
 
+> Historical boundary: Phase 9B extends the GitHub row with an explicit service binding and
+> write-only webhook secret, fixes the runtime to GitHub's public API origin, and replaces this
+> local-only GitHub receipt with a real installation/repository handshake. Prometheus and Slack
+> still use the Phase 9A behavior.
+
 ## Demo walkthrough
 
 1. Sign in as an admin and open **Connector custody**.
@@ -84,8 +89,8 @@ token never appears in any response or audit payload.
 
 ## Deferred Phase 9 slices
 
-- **9B:** multiline-safe GitHub App private-key ingress, installation authorization, signed webhook
-  verification, delivery replay protection, and real commit/deployment evidence
+- **9B (complete):** multiline-safe GitHub App private-key ingress, installation authorization,
+  signed webhook verification, delivery replay protection, and real commit/deployment evidence
 - **9C:** bounded Prometheus/OpenTelemetry queries and immutable evidence snapshots
 - **9D:** durable Slack updates and GitHub issue creation with downstream idempotency
 - **9E:** provider-specific OIDC authorization-code/PKCE login and membership administration

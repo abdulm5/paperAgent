@@ -207,6 +207,25 @@ def test_production_configuration_rejects_development_identity_defaults() -> Non
     assert "PAGERAGENT_OIDC_ISSUER" in message
     assert "PAGERAGENT_CONNECTOR_MASTER_KEY" in message
     assert "PAGERAGENT_CONNECTOR_KEY_VERSION" in message
+    assert "GITHUB_EVIDENCE_MODE" in message
+
+
+def test_github_request_budget_must_cover_bounded_pages_and_one_token_refresh() -> None:
+    with pytest.raises(ValidationError, match="GITHUB_MAX_API_REQUESTS is too small"):
+        Settings(
+            _env_file=None,
+            GITHUB_MAX_API_REQUESTS=22,
+            GITHUB_MAX_COMMITS=8,
+            GITHUB_MAX_RELATED_ITEMS=10,
+        )
+
+    config = Settings(
+        _env_file=None,
+        GITHUB_MAX_API_REQUESTS=23,
+        GITHUB_MAX_COMMITS=8,
+        GITHUB_MAX_RELATED_ITEMS=10,
+    )
+    assert config.github_max_api_requests == 23
 
 
 def test_production_configuration_accepts_complete_fail_closed_identity_settings() -> None:
@@ -222,7 +241,8 @@ def test_production_configuration_accepts_complete_fail_closed_identity_settings
         PAGERAGENT_INGEST_API_KEY="ingest-key-with-at-least-thirty-two-characters",
         PAGERAGENT_CONNECTOR_MASTER_KEY="eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=",
         PAGERAGENT_CONNECTOR_KEY_VERSION="production-v1",
-        PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS="https://connectors.example.com",
+        PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS="https://api.github.com",
+        GITHUB_EVIDENCE_MODE="connector",
         PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS="https://telemetry.example.com",
         backend_cors_origins="https://pageragent.example.com",
     )

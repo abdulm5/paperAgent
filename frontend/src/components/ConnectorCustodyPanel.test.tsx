@@ -45,6 +45,7 @@ const connector: ConnectorDetail = {
   status: "disabled",
   enabled: false,
   configuration: {
+    service: "checkout-api",
     repository: "pageragent/core",
     app_id: "42",
     installation_id: "84",
@@ -53,6 +54,7 @@ const connector: ConnectorDetail = {
   credential_version: 1,
   version: 3,
   last_validated_at: null,
+  last_validation_ok: null,
   last_validation_message: null,
   created_at: "2026-07-15T13:00:00Z",
   updated_at: "2026-07-15T13:00:00Z",
@@ -102,6 +104,7 @@ beforeEach(() => {
         status: "configured",
         version: 4,
         last_validated_at: "2026-07-15T13:10:00Z",
+        last_validation_ok: true,
         last_validation_message: "Credential accepted",
       });
     }
@@ -187,6 +190,94 @@ test("creates the selected provider contract with a blank-after-submit secret in
   expect(document.body).not.toHaveTextContent("xoxb-ui-sentinel");
 });
 
+test("preserves an LF PEM exactly when sealing the current GitHub App contract", async () => {
+  const privateKey = "-----BEGIN PRIVATE KEY-----\nline-one\nline-two\n-----END PRIVATE KEY-----\n";
+  const webhookSecret = "github-webhook-secret-with-enough-entropy";
+  render(<ConnectorCustodyPanel session={adminSession} />);
+  await screen.findByRole("heading", { name: connector.name });
+
+  fireEvent.click(screen.getByRole("button", { name: "New contract" }));
+  const form = screen.getByRole("heading", { name: "Declare a provider contract." }).closest("form");
+  expect(form).not.toBeNull();
+  const createForm = within(form!);
+  fireEvent.change(createForm.getByLabelText("Connector name"), {
+    target: { value: "Checkout repository evidence" },
+  });
+  fireEvent.change(createForm.getByLabelText(/Service binding/), {
+    target: { value: "checkout-api" },
+  });
+  fireEvent.change(createForm.getByLabelText(/Repository/), {
+    target: { value: "pageragent/core" },
+  });
+  fireEvent.change(createForm.getByLabelText(/App ID/), { target: { value: "42" } });
+  fireEvent.change(createForm.getByLabelText(/Installation ID/), { target: { value: "84" } });
+  const privateKeyInput = createForm.getByLabelText("Private key (private_key, write only)");
+  expect(privateKeyInput.tagName).toBe("TEXTAREA");
+  fireEvent.paste(privateKeyInput, {
+    clipboardData: { getData: () => privateKey },
+  });
+  fireEvent.change(createForm.getByLabelText("Webhook secret (webhook_secret, write only)"), {
+    target: { value: webhookSecret },
+  });
+  fireEvent.click(createForm.getByRole("button", { name: "Seal custody record" }));
+
+  await waitFor(() => {
+    expect(screen.queryByRole("heading", { name: "Declare a provider contract." })).not.toBeInTheDocument();
+  });
+  const createCall = vi.mocked(fetch).mock.calls.find(([input, init]) =>
+    String(input).endsWith("/connectors") && init?.method === "POST"
+  );
+  expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({
+    name: "Checkout repository evidence",
+    provider: "github",
+    configuration: {
+      service: "checkout-api",
+      repository: "pageragent/core",
+      app_id: "42",
+      installation_id: "84",
+    },
+    credentials: { private_key: privateKey, webhook_secret: webhookSecret },
+  });
+  expect(screen.queryByDisplayValue(privateKey)).not.toBeInTheDocument();
+  expect(screen.queryByDisplayValue(webhookSecret)).not.toBeInTheDocument();
+  expect(document.body).not.toHaveTextContent(webhookSecret);
+});
+
+test("unions legacy GitHub credential fields and preserves a CRLF PEM during rotation", async () => {
+  const privateKey = "-----BEGIN PRIVATE KEY-----\r\nlegacy-line\r\n-----END PRIVATE KEY-----\r\n";
+  const webhookSecret = "rotated-github-webhook-secret-with-entropy";
+  render(<ConnectorCustodyPanel session={adminSession} />);
+  await screen.findByRole("heading", { name: connector.name });
+
+  const privateKeyInput = screen.getByLabelText("Private key (private_key, write only)");
+  const webhookSecretInput = screen.getByLabelText("Webhook secret (webhook_secret, write only)");
+  expect(privateKeyInput.tagName).toBe("TEXTAREA");
+  expect(webhookSecretInput).toHaveAttribute("type", "password");
+  fireEvent.paste(privateKeyInput, {
+    clipboardData: { getData: () => privateKey },
+  });
+  fireEvent.change(webhookSecretInput, { target: { value: webhookSecret } });
+  fireEvent.click(screen.getByRole("button", { name: "Rotate credentials" }));
+
+  await waitFor(() => {
+    expect(
+      vi.mocked(fetch).mock.calls.some(([input, init]) =>
+        String(input).endsWith("/credentials") && init?.method === "PUT"
+      ),
+    ).toBe(true);
+  });
+  const rotationCall = vi.mocked(fetch).mock.calls.find(([input, init]) =>
+    String(input).endsWith("/credentials") && init?.method === "PUT"
+  );
+  expect(JSON.parse(String(rotationCall?.[1]?.body))).toEqual({
+    expected_version: connector.version,
+    credentials: { private_key: privateKey, webhook_secret: webhookSecret },
+  });
+  expect(screen.getByLabelText("Private key (private_key, write only)")).toHaveValue("");
+  expect(screen.getByLabelText("Webhook secret (webhook_secret, write only)")).toHaveValue("");
+  expect(document.body).not.toHaveTextContent(webhookSecret);
+});
+
 test("clears a replacement secret and sanitizes a provider error", async () => {
   rejectRotation = true;
   render(<ConnectorCustodyPanel session={adminSession} />);
@@ -194,11 +285,66 @@ test("clears a replacement secret and sanitizes a provider error", async () => {
 
   const secretInput = screen.getByLabelText("Private key (private_key, write only)");
   fireEvent.change(secretInput, { target: { value: "ui-sentinel-private-key" } });
+  fireEvent.change(screen.getByLabelText("Webhook secret (webhook_secret, write only)"), {
+    target: { value: "ui-sentinel-webhook-secret-with-entropy" },
+  });
   fireEvent.click(screen.getByRole("button", { name: "Rotate credentials" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent("Credentials could not be rotated.");
   expect(screen.getByLabelText("Private key (private_key, write only)")).toHaveValue("");
+  expect(screen.getByLabelText("Webhook secret (webhook_secret, write only)")).toHaveValue("");
   expect(document.body).not.toHaveTextContent("ui-sentinel-private-key");
+});
+
+test("renders the sanitized GitHub handshake receipt and allows enablement only after success", async () => {
+  const handshake = {
+    ...connector,
+    status: "configured" as const,
+    last_validated_at: "2026-07-15T13:10:00Z",
+    last_validation_ok: true,
+    last_validation_message: "Authenticated installation <84>; repository access confirmed.",
+  };
+  vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.endsWith("/events")) return jsonResponse([auditEvent]);
+    if (path.endsWith(`/connectors/${connector.id}`)) return jsonResponse(handshake);
+    if (path.endsWith("/connectors")) return jsonResponse([handshake]);
+    return jsonResponse(handshake);
+  });
+
+  render(<ConnectorCustodyPanel session={adminSession} />);
+
+  expect(await screen.findByText("GitHub App provider handshake succeeded.")).toBeInTheDocument();
+  expect(
+    screen.getByText("Validation receipt: Authenticated installation <84>; repository access confirmed."),
+  ).toBeInTheDocument();
+  expect(document.querySelector(".custody-validation script")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Enable connector" })).toBeEnabled();
+});
+
+test("keeps enablement unavailable when the server records an unsuccessful validation", async () => {
+  const invalid = {
+    ...connector,
+    status: "invalid" as const,
+    last_validated_at: "2026-07-15T13:10:00Z",
+    last_validation_ok: false,
+    last_validation_message: "GitHub App installation is not authorized for pageragent/core.",
+  };
+  vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.endsWith("/events")) return jsonResponse([auditEvent]);
+    if (path.endsWith(`/connectors/${connector.id}`)) return jsonResponse(invalid);
+    if (path.endsWith("/connectors")) return jsonResponse([invalid]);
+    return jsonResponse(invalid);
+  });
+
+  render(<ConnectorCustodyPanel session={adminSession} />);
+
+  expect(await screen.findByText(/Validation failed/)).toBeInTheDocument();
+  expect(
+    screen.getByText("Validation receipt: GitHub App installation is not authorized for pageragent/core."),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Enable connector" })).toBeDisabled();
 });
 
 test("drops transient secret state when manage authority is refreshed away", async () => {

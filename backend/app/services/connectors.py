@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -11,6 +12,7 @@ from app.connectors.contracts import (
     validate_configuration,
     validate_credentials,
 )
+from app.connectors.github import GitHubAppEvidenceProvider, GitHubProviderError
 from app.connectors.vault import (
     CredentialCipher,
     CredentialContext,
@@ -22,6 +24,7 @@ from app.db.models import (
     ConnectorAuditEventRecord,
     ConnectorCredentialRecord,
     ConnectorRecord,
+    OrganizationRecord,
 )
 from app.domain.connectors import (
     ConnectorAuditEvent,
@@ -31,7 +34,23 @@ from app.domain.connectors import (
     ConnectorProvider,
     ConnectorStatus,
     ConnectorSummary,
+    GithubConfiguration,
+    GithubCredentials,
 )
+from app.services.github_evidence import build_github_evidence_provider
+
+GithubProviderFactory = Callable[
+    [GithubConfiguration, GithubCredentials], GitHubAppEvidenceProvider
+]
+
+
+def build_github_provider(
+    configuration: GithubConfiguration,
+    credentials: GithubCredentials,
+) -> GitHubAppEvidenceProvider:
+    """Build the live adapter only at the final decrypted credential boundary."""
+
+    return build_github_evidence_provider(configuration, credentials)
 
 
 class ConnectorNotFoundError(Exception):
@@ -84,10 +103,12 @@ class ConnectorService:
         organization_id: UUID,
         *,
         cipher: CredentialCipher | None = None,
+        github_provider_factory: GithubProviderFactory | None = None,
     ) -> None:
         self.session = session
         self.organization_id = organization_id
         self.cipher = cipher or build_credential_cipher()
+        self.github_provider_factory = github_provider_factory or build_github_provider
 
     def list_connectors(self) -> list[ConnectorSummary]:
         records = self.session.scalars(
@@ -174,6 +195,17 @@ class ConnectorService:
         *,
         actor: str,
     ) -> ConnectorSummary:
+        if request.enabled is True:
+            # All enable operations for a tenant take the same lock before any
+            # connector row. This prevents two different rows from concurrently
+            # observing that a service binding is unowned and both enabling.
+            organization_exists = self.session.scalar(
+                select(OrganizationRecord.id)
+                .where(OrganizationRecord.id == self.organization_id)
+                .with_for_update()
+            )
+            if organization_exists is None:
+                raise ConnectorNotFoundError
         record = self._get_record(connector_id, for_update=True)
         self._check_version(record, request.expected_version)
         changed_fields: set[str] = set()
@@ -196,8 +228,10 @@ class ConnectorService:
         if request.enabled is not None:
             if request.enabled and record.last_validation_ok is not True:
                 raise ConnectorEnablementError(
-                    "A connector must pass local validation before it can be enabled"
+                    "A connector must pass its current validation before it can be enabled"
                 )
+            if request.enabled and record.provider == ConnectorProvider.GITHUB.value:
+                self._assert_github_enablement(record)
             record.enabled = request.enabled
             record.status = (
                 ConnectorStatus.CONFIGURED.value
@@ -282,12 +316,19 @@ class ConnectorService:
         *,
         actor: str,
     ) -> ConnectorSummary:
-        record = self._get_record(connector_id, for_update=True)
+        # Provider handshakes deliberately run outside a database transaction. A
+        # version/credential compare-and-swap below prevents a slow result from
+        # validating configuration that an administrator changed concurrently.
+        record = self._get_record(connector_id)
         self._check_version(record, expected_version)
         provider = ConnectorProvider(record.provider)
+        snapshot_version = record.version
+        snapshot_credential_version = record.credential.credential_version
+        configuration: dict[str, Any] | None = None
+        credentials: dict[str, str] | None = None
         valid = True
         try:
-            validate_configuration(provider, record.configuration)
+            configuration = validate_configuration(provider, record.configuration)
             sealed = self._sealed_credentials(record.credential)
             credentials = self.cipher.open(
                 sealed,
@@ -297,22 +338,74 @@ class ConnectorService:
                     record.credential.credential_version,
                 ),
             )
-            validate_credentials(provider, credentials)
+            credentials = validate_credentials(provider, credentials)
         except (ConnectorContractError, CredentialVaultError):
             valid = False
 
+        # End the read transaction before any external I/O. Snapshot values are
+        # plain copies and no ORM object is used again until the locked reload.
+        self.session.rollback()
+
+        provider_handshake_ok = False
+        if (
+            valid
+            and provider is ConnectorProvider.GITHUB
+            and configuration is not None
+            and credentials is not None
+        ):
+            try:
+                github_configuration = GithubConfiguration.model_validate(configuration)
+                github_credentials = GithubCredentials.model_validate(credentials)
+                github_provider = self.github_provider_factory(
+                    github_configuration,
+                    github_credentials,
+                )
+                try:
+                    github_provider.validate()
+                finally:
+                    close = getattr(github_provider, "close", None)
+                    if callable(close):
+                        close()
+                provider_handshake_ok = True
+            except GitHubProviderError:
+                valid = False
+            except Exception:
+                # Private-key parser and injected transport details are never
+                # reflected through connector receipts or audit payloads.
+                valid = False
+
+        record = self._get_record(connector_id, for_update=True)
+        if (
+            record.version != snapshot_version
+            or record.credential.credential_version != snapshot_credential_version
+        ):
+            current_version = record.version
+            self.session.rollback()
+            raise ConnectorVersionConflictError(current_version)
+
         if valid:
-            message = (
-                "Local connector contract and credential vault integrity passed; "
-                "provider handshake is pending."
-            )
+            if provider_handshake_ok:
+                message = (
+                    "GitHub App installation and repository read handshake passed; "
+                    "the connector may now be enabled."
+                )
+            else:
+                message = (
+                    "Local connector contract and credential vault integrity passed; "
+                    "this provider adapter is not active in Phase 9B."
+                )
             record.status = (
                 ConnectorStatus.CONFIGURED.value
                 if record.enabled
                 else ConnectorStatus.DISABLED.value
             )
         else:
-            message = "Local connector validation failed; provider handshake is pending."
+            message = (
+                "GitHub provider handshake or credential validation failed; "
+                "the connector remains disabled."
+                if provider is ConnectorProvider.GITHUB
+                else "Local connector contract or credential validation failed."
+            )
             record.enabled = False
             record.status = ConnectorStatus.INVALID.value
         record.last_validated_at = datetime.now(UTC)
@@ -354,6 +447,40 @@ class ConnectorService:
     def _check_version(record: ConnectorRecord, expected_version: int) -> None:
         if record.version != expected_version:
             raise ConnectorVersionConflictError(record.version)
+
+    def _assert_github_enablement(self, record: ConnectorRecord) -> None:
+        configuration = validate_configuration(
+            ConnectorProvider.GITHUB,
+            record.configuration,
+        )
+        if set(record.credential.credential_field_names) != {
+            "private_key",
+            "webhook_secret",
+        }:
+            raise ConnectorEnablementError(
+                "GitHub credentials must be rotated to the Phase 9B contract and revalidated"
+            )
+        service = str(configuration["service"])
+        other_records = self.session.scalars(
+            select(ConnectorRecord).where(
+                ConnectorRecord.organization_id == self.organization_id,
+                ConnectorRecord.provider == ConnectorProvider.GITHUB.value,
+                ConnectorRecord.enabled.is_(True),
+                ConnectorRecord.id != record.id,
+            )
+        ).all()
+        for other in other_records:
+            try:
+                other_configuration = validate_configuration(
+                    ConnectorProvider.GITHUB,
+                    other.configuration,
+                )
+            except ConnectorContractError:
+                continue
+            if other_configuration["service"] == service:
+                raise ConnectorEnablementError(
+                    "Another enabled GitHub connector already owns this service binding"
+                )
 
     def _credential_context(
         self,

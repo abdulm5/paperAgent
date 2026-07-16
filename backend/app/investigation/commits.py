@@ -1,10 +1,12 @@
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
 from pydantic import BaseModel
 
+from app.domain.github import CommitRecord, GitEvidenceBundle
 from app.investigation.clustering import ClusterResult
 from app.investigation.text import token_coverage, tokenize
 
@@ -14,18 +16,6 @@ class CommitFixture(BaseModel):
     title: str
     author: str
     minutes_before_deploy: int
-    services: list[str]
-    owners: list[str]
-    change_types: list[str]
-    files_changed: list[str]
-    diff_summary: str
-
-
-class CommitRecord(BaseModel):
-    sha: str
-    title: str
-    author: str
-    committed_at: datetime
     services: list[str]
     owners: list[str]
     change_types: list[str]
@@ -43,7 +33,12 @@ class RankedCommit(BaseModel):
 class GitProvider(Protocol):
     version: str
 
-    def list_recent_commits(self, deployed_at: datetime) -> list[CommitRecord]: ...
+    def collect_evidence(
+        self,
+        deployed_at: datetime,
+        service: str,
+        active_commit_sha: str,
+    ) -> GitEvidenceBundle: ...
 
 
 class FixtureGitProvider:
@@ -52,7 +47,27 @@ class FixtureGitProvider:
     def __init__(self, fixture_path: Path) -> None:
         self.fixture_path = fixture_path
 
+    def collect_evidence(
+        self,
+        deployed_at: datetime,
+        service: str,
+        active_commit_sha: str,
+    ) -> GitEvidenceBundle:
+        commits = self.list_recent_commits(deployed_at)
+        return GitEvidenceBundle(
+            source_uri=f"fixture://{self.version}",
+            provider="fixture",
+            repository=f"fixture/{self.fixture_path.stem[:100]}",
+            provider_version=self.version,
+            deployed_at=deployed_at,
+            service=service,
+            active_commit_sha=active_commit_sha,
+            commits=commits,
+        )
+
     def list_recent_commits(self, deployed_at: datetime) -> list[CommitRecord]:
+        """Compatibility shim for callers migrating to ``collect_evidence``."""
+
         document = json.loads(self.fixture_path.read_text())
         fixtures = [CommitFixture.model_validate(item) for item in document["commits"]]
         return [
@@ -99,7 +114,9 @@ class CommitRanker:
         for commit in commits:
             minutes = abs((deployed_at - commit.committed_at).total_seconds()) / 60
             proximity = max(0.0, 1.0 - minutes / 120)
-            deploy_correlation = 1.0 if commit.sha == active_commit_sha else proximity * 0.65
+            deploy_correlation = (
+                1.0 if sha_matches(commit.sha, active_commit_sha) else proximity * 0.65
+            )
             service_overlap = 1.0 if service in commit.services else 0.0
             document_tokens = tokenize(
                 commit.title,
@@ -162,7 +179,7 @@ class CommitRanker:
         ownership: float,
     ) -> list[str]:
         reasons: list[str] = []
-        if commit.sha == active_commit_sha:
+        if sha_matches(commit.sha, active_commit_sha):
             reasons.append("Matches the commit recorded on the active release.")
         if service_overlap:
             reasons.append("Touches the affected checkout service.")
@@ -173,3 +190,18 @@ class CommitRanker:
         if ownership:
             reasons.append("Owned by the responsible payments platform team.")
         return reasons or ["Weak temporal correlation; no direct failure-path evidence."]
+
+
+_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,64}$")
+
+
+def sha_matches(left: str, right: str) -> bool:
+    """Match Git SHAs by an unambiguous, minimum-length hexadecimal prefix."""
+
+    if _SHA_PATTERN.fullmatch(left) is None or _SHA_PATTERN.fullmatch(right) is None:
+        return False
+    normalized_left = left.lower()
+    normalized_right = right.lower()
+    return normalized_left.startswith(normalized_right) or normalized_right.startswith(
+        normalized_left
+    )

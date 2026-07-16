@@ -32,9 +32,10 @@ from app.domain.investigations import (
 from app.investigation.causes import CauseRanker
 from app.investigation.clustering import ErrorClusterer
 from app.investigation.collectors import HttpTelemetryCollector, TelemetryCollector
-from app.investigation.commits import CommitRanker, FixtureGitProvider, GitProvider
+from app.investigation.commits import CommitRanker, GitProvider
 from app.investigation.runbooks import RunbookRetriever
 from app.investigation.text import canonical_hash
+from app.services.github_evidence import TenantGitEvidenceProvider
 from app.services.incidents import IncidentNotFoundError
 from app.workflows.fencing import (
     WorkflowFence,
@@ -84,6 +85,10 @@ class InvestigationService:
         if not incident.alerts:
             raise InvestigationExecutionError("Incident has no source alert")
         alert = AlertPayload.model_validate(incident.alerts[0].payload)
+        incident_record_id = incident.id
+        incident_service = incident.service
+        incident_summary = incident.summary
+        incident_status = incident.status
         preflight_hash = canonical_hash(
             {
                 "alert": alert.model_dump(mode="json"),
@@ -102,7 +107,7 @@ class InvestigationService:
                 .join(IncidentRecord)
                 .where(
                     InvestigationRunRecord.workflow_job_id == workflow_job_id,
-                    InvestigationRunRecord.incident_id == incident.id,
+                    InvestigationRunRecord.incident_id == incident_record_id,
                     IncidentRecord.organization_id == self.organization_id,
                 )
             )
@@ -111,7 +116,7 @@ class InvestigationService:
 
         if run is None:
             run = InvestigationRunRecord(
-                incident_id=incident.id,
+                incident_id=incident_record_id,
                 workflow_job_id=workflow_job_id,
                 status=InvestigationStatus.RUNNING.value,
                 collector_version=self.collector.version,
@@ -137,6 +142,31 @@ class InvestigationService:
 
         try:
             telemetry = self.collector.collect(str(alert.telemetry_url))
+            cluster_results = self.clusterer.cluster(telemetry)
+            current_release = telemetry.get("current_release", {})
+            deployed_at = self._parse_datetime(
+                current_release.get("deployed_at") or alert.release.deployed_at
+            )
+            active_commit_sha = str(
+                current_release.get("commit_sha") or alert.release.commit_sha
+            )
+            failure_mode = self._failure_mode(alert)
+            query = self._investigation_query(incident_summary, cluster_results)
+            runbook_matches = self.runbook_retriever.retrieve(
+                service=incident_service,
+                failure_mode=failure_mode,
+                query=query,
+            )
+            git_evidence = self.git_provider.collect_evidence(
+                deployed_at,
+                incident_service,
+                active_commit_sha,
+            )
+            commits = git_evidence.commits
+
+            # All network and filesystem reads finish before evidence persistence.
+            # The live GitHub selector then holds a short revision lock until the
+            # evidence commit so a revoked connector cannot authorize stale data.
             telemetry_artifact = self._add_artifact(
                 run.id,
                 kind="telemetry_snapshot",
@@ -178,7 +208,6 @@ class InvestigationService:
                 )
             self.session.flush()
 
-            cluster_results = self.clusterer.cluster(telemetry)
             cluster_records = [
                 ErrorClusterRecord(
                     investigation_id=run.id,
@@ -197,25 +226,87 @@ class InvestigationService:
             self.session.add_all(cluster_records)
             self.session.flush()
 
-            current_release = telemetry.get("current_release", {})
-            deployed_at = self._parse_datetime(
-                current_release.get("deployed_at") or alert.release.deployed_at
-            )
-            active_commit_sha = str(current_release.get("commit_sha") or alert.release.commit_sha)
-            commits = self.git_provider.list_recent_commits(deployed_at)
+            git_metadata: dict[str, Any] = {
+                "provider": git_evidence.provider,
+                "provider_version": git_evidence.provider_version,
+                "repository": git_evidence.repository,
+                "service": git_evidence.service,
+                "active_commit_sha": git_evidence.active_commit_sha,
+                "deployed_at": git_evidence.deployed_at.isoformat(),
+            }
+            for field in ("connector_id", "connector_version", "credential_version"):
+                value = getattr(git_evidence, field, None)
+                if value is not None:
+                    git_metadata[field] = str(value) if field == "connector_id" else value
             commit_catalog = self._add_artifact(
                 run.id,
                 kind="commit_catalog",
-                source_uri=f"fixture://{self.git_provider.version}",
+                source_uri=git_evidence.source_uri,
                 payload={
-                    "provider_version": self.git_provider.version,
+                    **git_metadata,
                     "commits": [commit.model_dump(mode="json") for commit in commits],
                 },
             )
+            provider_artifacts: list[EvidenceArtifactRecord] = []
+            if git_evidence.provider == "github_app":
+                provider_artifacts.extend(
+                    [
+                        self._add_artifact(
+                            run.id,
+                            kind="github_pull_request_history",
+                            source_uri=git_evidence.source_uri,
+                            payload={
+                                **git_metadata,
+                                "pull_requests": [
+                                    item.model_dump(mode="json")
+                                    for item in git_evidence.pull_requests
+                                ],
+                            },
+                        ),
+                        self._add_artifact(
+                            run.id,
+                            kind="github_deployment_history",
+                            source_uri=git_evidence.source_uri,
+                            payload={
+                                **git_metadata,
+                                "deployments": [
+                                    item.model_dump(mode="json")
+                                    for item in git_evidence.deployments
+                                ],
+                            },
+                        ),
+                        self._add_artifact(
+                            run.id,
+                            kind="github_release_history",
+                            source_uri=git_evidence.source_uri,
+                            payload={
+                                **git_metadata,
+                                "releases": [
+                                    item.model_dump(mode="json")
+                                    for item in git_evidence.releases
+                                ],
+                            },
+                        ),
+                    ]
+                )
+                webhook_receipts = getattr(git_evidence, "webhook_receipts", [])
+                provider_artifacts.append(
+                    self._add_artifact(
+                        run.id,
+                        kind="github_webhook_history",
+                        source_uri=git_evidence.source_uri,
+                        payload={
+                            **git_metadata,
+                            "deliveries": [
+                                item.model_dump(mode="json") for item in webhook_receipts
+                            ],
+                        },
+                    )
+                )
             self.session.flush()
             ranked_commits = self.commit_ranker.rank(
                 commits=commits,
-                service=incident.service,
+                service=incident_service,
                 deployed_at=deployed_at,
                 active_commit_sha=active_commit_sha,
                 clusters=cluster_results,
@@ -224,6 +315,7 @@ class InvestigationService:
                 str(telemetry_artifact.id),
                 str(deployment_artifact.id),
                 str(commit_catalog.id),
+                *(str(artifact.id) for artifact in provider_artifacts),
                 *(str(artifact.id) for artifact in support_artifacts),
                 *(str(cluster.id) for cluster in cluster_records),
             ]
@@ -260,13 +352,6 @@ class InvestigationService:
                     )
                 )
 
-            failure_mode = self._failure_mode(alert)
-            query = self._investigation_query(incident.summary, cluster_results)
-            runbook_matches = self.runbook_retriever.retrieve(
-                service=incident.service,
-                failure_mode=failure_mode,
-                query=query,
-            )
             runbook_corpus = self._add_artifact(
                 run.id,
                 kind="runbook_corpus",
@@ -319,6 +404,7 @@ class InvestigationService:
                             deployment_artifact.content_hash,
                             commit_catalog.content_hash,
                             runbook_corpus.content_hash,
+                            *(artifact.content_hash for artifact in provider_artifacts),
                             *(artifact.content_hash for artifact in support_artifacts),
                         ]
                     ),
@@ -331,11 +417,11 @@ class InvestigationService:
             top_runbook = runbook_matches[0] if runbook_matches else None
             self.session.add(
                 IncidentEventRecord(
-                    incident_id=incident.id,
+                    incident_id=incident_record_id,
                     event_type="investigation.completed",
                     actor="pageragent-investigator",
                     from_status=None,
-                    to_status=incident.status,
+                    to_status=incident_status,
                     note="Evidence collection and deterministic ranking completed.",
                     payload={
                         "investigation_id": str(run.id),
@@ -573,7 +659,14 @@ def build_investigation_service(
             allowed_origins=settings.investigation_telemetry_allowed_origins,
             allow_private_networks=settings.environment.lower() in {"local", "test"},
         ),
-        git_provider=FixtureGitProvider(settings.commit_fixture_path),
+        git_provider=TenantGitEvidenceProvider(
+            session,
+            organization_id,
+            mode=settings.github_evidence_mode,
+            fixture_path=settings.commit_fixture_path,
+            lookback_hours=settings.github_evidence_lookback_hours,
+            max_webhook_receipts=settings.github_max_related_items,
+        ),
         clusterer=ErrorClusterer(),
         commit_ranker=CommitRanker(),
         cause_ranker=CauseRanker(),

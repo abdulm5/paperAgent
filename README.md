@@ -4,11 +4,12 @@ PagerAgent is an evidence-grounded incident-response copilot. It helps an on-cal
 
 ## Project status
 
-**Phase 9A — secure connector control plane.** PagerAgent now gives each organization a typed,
-audited custody boundary for future GitHub, Prometheus, and Slack integrations. Administrators can
-register disabled connectors, rotate write-only credentials protected by per-revision envelope
-encryption, validate local custody, and explicitly enable them. Incident commanders receive
-read-only operational visibility; lower roles and other organizations receive no connector data.
+**Phase 9B — authenticated GitHub evidence.** PagerAgent now turns an encrypted, tenant-owned
+GitHub App connector into bounded incident evidence. It performs a real installation/repository
+handshake, verifies webhook HMACs over raw bytes, absorbs delivery retries in a durable PostgreSQL
+inbox, and snapshots normalized commits, pull requests, deployments, releases, and webhook receipts
+for deterministic ranking. Private keys, webhook secrets, App JWTs, and installation tokens never
+enter the evidence graph.
 
 ## The interview story
 
@@ -17,15 +18,18 @@ PagerAgent is designed around a simple principle: the model synthesizes evidence
 1. A signed user session selects one active organization and receives an exact permission receipt.
 2. An administrator provisions a disabled provider connector through a typed contract; PagerAgent
    seals its write-only credential with a per-revision data key and records a sanitized custody
-   event before the connector can be enabled.
-3. A versioned simulator scenario introduces a code, configuration, or dependency failure.
-4. Tenant-authenticated telemetry crosses an alert threshold and atomically creates an incident, durable workflow, first job, workflow events, and outbox message in PostgreSQL.
-5. A separate relay publishes the job to Redis Streams; a database-leased worker gathers evidence, ranks causal signals, and retrieves the matching runbook.
-6. PagerAgent proposes a cited typed action—or blocks automation when the evidence points outside its authority—without losing work if a process restarts.
-7. An authorized human approves or rejects the proposal. Approval atomically queues a separate mitigation workflow instead of performing the external write in the request.
-8. The worker executes the allow-listed action with a proposal-scoped idempotency key and records recovery verification before the incident is mitigated.
-9. Resolution queues a durable postmortem workflow; the resulting cited report can be revised, finalized, and exported.
-10. The tenant-filtered workflow recorder follows every queue, lease, retry, completion, and dead-letter event through a replayable server-sent event stream.
+   event before the connector can be validated and enabled.
+3. For GitHub, validation exchanges a short-lived App JWT for a repository-scoped installation
+   token outside the database lock. Signed change deliveries enter a replay-safe provider inbox.
+4. A versioned simulator scenario introduces a code, configuration, or dependency failure.
+5. Tenant-authenticated telemetry crosses an alert threshold and atomically creates an incident, durable workflow, first job, workflow events, and outbox message in PostgreSQL.
+6. A separate relay publishes the job to Redis Streams; a database-leased worker gathers telemetry,
+   normalized GitHub evidence, and runbooks, then ranks causal signals.
+7. PagerAgent proposes a cited typed action—or blocks automation when the evidence points outside its authority—without losing work if a process restarts.
+8. An authorized human approves or rejects the proposal. Approval atomically queues a separate mitigation workflow instead of performing the external write in the request.
+9. The worker executes the allow-listed action with a proposal-scoped idempotency key and records recovery verification before the incident is mitigated.
+10. Resolution queues a durable postmortem workflow; the resulting cited report can be revised, finalized, and exported.
+11. The tenant-filtered workflow recorder follows every queue, lease, retry, completion, and dead-letter event through a replayable server-sent event stream.
 
 ## Repository layout
 
@@ -73,12 +77,40 @@ To demonstrate the connector custody boundary independently from an incident:
 The script creates a disabled Prometheus connector, proves the submitted token is absent from every
 API and audit response, validates the authenticated envelope, enables the connector with an
 optimistic version check, rotates the credential back into a disabled state, and prints the
-sanitized custody history. It validates storage and authorization only—Phase 9A makes no provider
-network request. The incident demo below still uses deterministic simulator telemetry, Git
-fixtures, and local runbooks; Phase 9B and 9C will connect these custody records to the evidence
-pipeline as separate vertical slices.
+sanitized custody history. It intentionally remains the Phase 9A storage/authorization proof and
+makes no provider network request.
 
-To replay the first incident automatically:
+To run the live GitHub evidence proof, export a GitHub App installation and a separate webhook
+secret, then run:
+
+```bash
+export GITHUB_APP_ID=...
+export GITHUB_INSTALLATION_ID=...
+export GITHUB_REPOSITORY=owner/repository
+export GITHUB_SERVICE=checkout-api
+export GITHUB_PRIVATE_KEY_FILE=/absolute/path/to/app-private-key.pem
+export GITHUB_WEBHOOK_SECRET=...
+./scripts/run-github-evidence-demo.sh
+```
+
+Install the App on the exact repository with **Contents: read**, **Pull requests: read**, and
+**Deployments: read** permissions. For provider-originated deliveries, configure the App webhook
+URL as `https://<your-pageragent-host>/api/v1/webhooks/github/<connector_id>`, use the same
+independent webhook secret, and subscribe to push, pull request, deployment, deployment status, and
+release events. The proof script creates the connector first and synthesizes a correctly signed
+delivery locally so the authentication and replay behavior remain easy to reproduce without a
+public tunnel.
+
+The script never prints or places the PEM in a command-line argument. It creates or rotates the
+disabled connector, performs the real repository handshake, enables it, accepts one correctly
+signed delivery, proves an exact retry is idempotent, rejects a changed-body replay, and prints the
+normalized tenant-scoped receipt. Add `--with-incident` to run the checkout scenario in explicit
+connector mode and assert that its investigation contains GitHub App evidence artifacts. That
+option requires at least one commit in the configured repository within PagerAgent's 24-hour
+evidence window so the demo can prove live commit ranking, and it requires
+`GITHUB_SERVICE=checkout-api` because that is the included incident scenario.
+
+To replay the first incident automatically with deterministic Git fixtures:
 
 ```bash
 ./scripts/run-demo.sh
@@ -145,14 +177,16 @@ cd frontend && npm install && npm run dev
 7. Durable orchestration (complete): transactional outbox, verified Redis Streams repair, leased attempts with commit fencing, retries and dead letters, replay-safe side effects, commit-ordered SSE workflow receipts, and trace correlation.
 8A. Identity boundary (complete): fixed-issuer OIDC token verification and session exchange, database-backed membership and RBAC, server-derived actors, tenant-isolated incident/workflow access, CSRF protection, machine-authenticated alert ingestion, and server-controlled telemetry destinations.
 9A. Connector control plane (complete): tenant-owned provider contracts, write-only credential APIs, per-revision AES-GCM envelope encryption, exact-key rotation, optimistic updates, safe disabled defaults, RBAC, and append-only custody events.
-9B. GitHub evidence (next): GitHub App installation flow, signed webhook verification, replay protection, and real commit/deployment evidence.
+9B. GitHub evidence (complete): multiline App-key custody, repository-scoped installation authorization, two-phase provider validation, signed webhook verification, durable replay protection, bounded/rate-aware REST collection, and normalized commit/PR/deployment/release evidence.
 9C. Observability evidence (planned): bounded Prometheus and OpenTelemetry queries persisted as immutable evidence snapshots.
 9D. Collaboration outputs (planned): durable, idempotent Slack updates and GitHub issue creation.
 9E. Hosted identity and administration (planned): provider-specific OIDC authorization-code/PKCE login and membership administration.
 
-See [the Phase 9A walkthrough](docs/milestones/09a-connector-control-plane.md) and
-[ADR 0010](docs/decisions/0010-connector-secrets-use-envelope-encryption.md) for the credential
-custody contract. The [architecture guide](docs/architecture.md),
+See [the Phase 9B walkthrough](docs/milestones/09b-github-evidence.md) and
+[ADR 0011](docs/decisions/0011-github-deliveries-are-authenticated-idempotent-inputs.md) for the
+GitHub trust boundary. [Phase 9A](docs/milestones/09a-connector-control-plane.md) and
+[ADR 0010](docs/decisions/0010-connector-secrets-use-envelope-encryption.md) cover credential
+custody. The [architecture guide](docs/architecture.md),
 [Phase 8A walkthrough](docs/milestones/08a-production-identity.md), and
 [ADR 0009](docs/decisions/0009-organization-scoped-identity-and-access.md) cover identity and tenant
 isolation; the [Phase 7 walkthrough](docs/milestones/07-durable-orchestration.md) and

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.api.routes.investigations import get_investigation_service
+from app.domain.github import GitEvidenceBundle, GitWebhookReceipt
 from app.evaluation.investigations import (
     InvestigationGroundTruth,
     evaluate_investigation,
@@ -14,7 +15,7 @@ from app.evaluation.investigations import (
 from app.investigation.causes import CauseRanker
 from app.investigation.clustering import ErrorClusterer
 from app.investigation.collectors import StaticTelemetryCollector
-from app.investigation.commits import CommitRanker, FixtureGitProvider
+from app.investigation.commits import CommitRanker, FixtureGitProvider, GitProvider
 from app.investigation.runbooks import RunbookRetriever
 from app.main import app
 from app.services.incidents import IncidentService
@@ -99,11 +100,16 @@ def telemetry_payload() -> dict[str, Any]:
     }
 
 
-def build_service(session: Session) -> InvestigationService:
+def build_service(
+    session: Session,
+    *,
+    git_provider: GitProvider | None = None,
+) -> InvestigationService:
     return InvestigationService(
         session=session,
         collector=StaticTelemetryCollector(telemetry_payload()),
-        git_provider=FixtureGitProvider(REPOSITORY_ROOT / "scenarios/checkout-commits.json"),
+        git_provider=git_provider
+        or FixtureGitProvider(REPOSITORY_ROOT / "scenarios/checkout-commits.json"),
         clusterer=ErrorClusterer(),
         commit_ranker=CommitRanker(),
         cause_ranker=CauseRanker(),
@@ -144,6 +150,97 @@ def test_investigation_clusters_errors_and_ranks_ground_truth_first(
     ].explanation
     assert result.runbook_matches[0].runbook_id == "checkout-api-rollback"
     assert result.runbook_matches[0].rank == 1
+
+
+class GitHubArtifactProvider:
+    version = "github-artifact-test-v1"
+
+    def collect_evidence(
+        self,
+        deployed_at: datetime,
+        service: str,
+        active_commit_sha: str,
+    ) -> GitEvidenceBundle:
+        fixture = FixtureGitProvider(
+            REPOSITORY_ROOT / "scenarios/checkout-commits.json"
+        ).collect_evidence(deployed_at, service, active_commit_sha)
+        return GitEvidenceBundle.model_validate(
+            {
+                **fixture.model_dump(),
+                "source_uri": "github://octo-org/pageragent",
+                "provider": "github_app",
+                "repository": "octo-org/pageragent",
+                "provider_version": self.version,
+                "connector_id": "22222222-2222-4222-8222-222222222222",
+                "connector_version": 4,
+                "credential_version": 2,
+                "webhook_receipts": [
+                    GitWebhookReceipt(
+                        delivery_id="11111111-1111-4111-8111-111111111111",
+                        event_type="deployment_status",
+                        action="created",
+                        repository="octo-org/pageragent",
+                        installation_id=67890,
+                        connector_version=4,
+                        credential_version=2,
+                        body_sha256="d" * 64,
+                        received_at=deployed_at,
+                    ).model_dump()
+                ],
+            }
+        )
+
+
+def test_investigation_persists_normalized_github_artifacts_with_traceable_provenance(
+    db_session: Session,
+) -> None:
+    incident_id = UUID(
+        TestClient(app).post("/api/v1/alerts", json=alert_payload()).json()["incident"]["id"]
+    )
+
+    result = build_service(
+        db_session,
+        git_provider=GitHubArtifactProvider(),
+    ).run(incident_id)
+    evidence_by_kind = {artifact.kind: artifact for artifact in result.evidence}
+
+    assert set(evidence_by_kind) == {
+        "telemetry_snapshot",
+        "deployment_history",
+        "commit_catalog",
+        "github_pull_request_history",
+        "github_deployment_history",
+        "github_release_history",
+        "github_webhook_history",
+        "runbook_corpus",
+    }
+    for kind in {
+        "commit_catalog",
+        "github_pull_request_history",
+        "github_deployment_history",
+        "github_release_history",
+        "github_webhook_history",
+    }:
+        artifact = evidence_by_kind[kind]
+        assert artifact.source_uri == "github://octo-org/pageragent"
+        assert artifact.payload["connector_id"] == (
+            "22222222-2222-4222-8222-222222222222"
+        )
+        assert artifact.payload["connector_version"] == 4
+        assert artifact.payload["credential_version"] == 2
+    webhook_payload = evidence_by_kind["github_webhook_history"].payload
+    assert webhook_payload["deliveries"][0]["body_sha256"] == "d" * 64
+    assert "normalized_payload" not in str(webhook_payload)
+    provider_evidence_ids = {
+        str(evidence_by_kind[kind].id)
+        for kind in {
+            "github_pull_request_history",
+            "github_deployment_history",
+            "github_release_history",
+            "github_webhook_history",
+        }
+    }
+    assert provider_evidence_ids.issubset(result.commit_candidates[0].evidence_ids)
 
 
 def test_investigation_is_reproducible_and_updates_incident_timeline(

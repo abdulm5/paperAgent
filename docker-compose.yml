@@ -44,6 +44,7 @@ services:
       AUTO_GENERATE_PROPOSALS: "true"
       AUTO_GENERATE_POSTMORTEMS: "true"
       DURABLE_MITIGATION_ENABLED: "true"
+      GITHUB_EVIDENCE_MODE: "${GITHUB_EVIDENCE_MODE:-auto}"
       CHECKOUT_CONTROL_URL: http://checkout-api:8100
       PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS: http://checkout-api:8100
     ports:
@@ -96,6 +97,7 @@ services:
       RUNBOOK_DIRECTORY: /runbooks
       COMMIT_FIXTURE_PATH: /scenarios/checkout-commits.json
       SCENARIO_DIRECTORY: /scenarios
+      GITHUB_EVIDENCE_MODE: "${GITHUB_EVIDENCE_MODE:-auto}"
       CHECKOUT_CONTROL_URL: http://checkout-api:8100
       PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS: http://checkout-api:8100
     volumes:

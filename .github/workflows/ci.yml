@@ -24,9 +24,11 @@ jobs:
         env:
           DATABASE_URL: sqlite+pysqlite:///./ci.db
       - name: Lint backend
-        run: ruff check app tests
+        run: ruff check app tests migrations
       - name: Validate demo shells
-        run: bash -n ../scripts/run-demo.sh ../scripts/run-durability-demo.sh
+        run: >-
+          bash -n ../scripts/run-demo.sh ../scripts/run-durability-demo.sh
+          ../scripts/run-connector-demo.sh ../scripts/run-github-evidence-demo.sh
       - name: Run durable workflow reliability tests
         run: pytest tests/test_workflows.py
       - name: Run remaining backend tests
@@ -71,8 +73,8 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
       - run: alembic upgrade head
-      - name: Exercise PostgreSQL relay contention and Redis recovery
-        run: pytest -q tests/integration/test_workflow_runtime.py
+      - name: Exercise PostgreSQL contention and Redis recovery
+        run: pytest -q tests/integration
 
   simulator:
     runs-on: ubuntu-latest

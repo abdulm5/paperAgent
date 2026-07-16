@@ -79,14 +79,16 @@ const connectorDetail: ConnectorDetail = {
   status: "configured",
   enabled: true,
   configuration: {
+    service: "checkout-api",
     repository: "pageragent/core",
     app_id: "42",
     installation_id: "84",
   },
-  credential_fields: ["private_key"],
+  credential_fields: ["private_key", "webhook_secret"],
   credential_version: 2,
   version: 4,
   last_validated_at: "2026-07-15T13:10:00Z",
+  last_validation_ok: true,
   last_validation_message: "Credential accepted",
   created_at: "2026-07-15T13:00:00Z",
   updated_at: "2026-07-15T13:10:00Z",
@@ -183,6 +185,19 @@ const investigation: InvestigationDetail = {
       payload: {},
       collected_at: "2026-07-10T00:48:46Z",
     },
+    {
+      id: "92345678-bc8f-4ff3-a6d5-d898aca654ce",
+      kind: "commit_catalog",
+      source_uri: "github://pageragent/core/commits",
+      content_hash: "d".repeat(64),
+      payload: {
+        provider: "github_app",
+        repository: "pageragent/core",
+        connector_version: 7,
+        credential_version: 3,
+      },
+      collected_at: "2026-07-10T00:48:46Z",
+    },
   ],
   error_clusters: [
     {
@@ -207,7 +222,10 @@ const investigation: InvestigationDetail = {
       rank: 1,
       score: 0.96,
       explanation: ["The active commit matches the failing validation path."],
-      evidence_ids: ["12345678-bc8f-4ff3-a6d5-d898aca654ce"],
+      evidence_ids: [
+        "12345678-bc8f-4ff3-a6d5-d898aca654ce",
+        "92345678-bc8f-4ff3-a6d5-d898aca654ce",
+      ],
     },
   ],
   commit_candidates: [
@@ -229,7 +247,10 @@ const investigation: InvestigationDetail = {
         ownership_relevance: 1,
       },
       explanation: ["Matches the commit recorded on the active release."],
-      evidence_ids: ["12345678-bc8f-4ff3-a6d5-d898aca654ce"],
+      evidence_ids: [
+        "12345678-bc8f-4ff3-a6d5-d898aca654ce",
+        "92345678-bc8f-4ff3-a6d5-d898aca654ce",
+      ],
     },
   ],
   runbook_matches: [
@@ -660,6 +681,28 @@ test("renders persisted incident evidence from the API", async () => {
   expect(screen.getByText("All gates passing")).toBeInTheDocument();
   expect(screen.getByText("payment-gateway")).toBeInTheDocument();
   expect(document.querySelector(".queue-item.selected")).toHaveAttribute("aria-current", "true");
+});
+
+test("renders ranked GitHub App evidence and its immutable receipt without another request", async () => {
+  render(<App />);
+
+  expect(await screen.findByRole("heading", { name: summary.summary })).toBeInTheDocument();
+  const receipt = screen.getByRole("region", { name: "GitHub App provenance receipt" });
+  expect(receipt).toHaveTextContent("pageragent/core");
+  expect(receipt).toHaveTextContent(/Connector version\s*v7/);
+  expect(receipt).toHaveTextContent(/Credential version\s*v3/);
+  expect(receipt).toHaveTextContent("github://pageragent/core/commits");
+  expect(receipt).toHaveTextContent("d".repeat(64));
+  expect(screen.getAllByText("8fa23c1").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Refactor digital wallet validation rules").length).toBeGreaterThan(0);
+  expect(
+    vi.mocked(fetch).mock.calls.filter(([input]) =>
+      String(input).endsWith("/investigations/latest")
+    ),
+  ).toHaveLength(1);
+  expect(
+    vi.mocked(fetch).mock.calls.some(([input]) => String(input).startsWith("https://github.com/")),
+  ).toBe(false);
 });
 
 test("keeps connector custody separate and loads it only when selected", async () => {

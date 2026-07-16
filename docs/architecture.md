@@ -35,8 +35,8 @@ The LLM is deliberately downstream of evidence gathering. It can summarize, comp
 | Component | Current responsibility | Later responsibility |
 | --- | --- | --- |
 | `simulator/` | Reproduce code, configuration, and upstream-dependency failures | Add production-like distributed services |
-| `backend/` | Authenticate identities, enforce organization membership and RBAC, custody typed connector credentials, persist incidents and workflows, relay a transactional outbox, execute database-leased jobs, rank causes, validate grounded briefs, enforce approval policy, verify recovery, and version postmortems | Add production evidence and action adapters |
-| PostgreSQL | Own connector metadata, encrypted credential envelopes and custody events alongside incident state, workflows, leases, results, and unpublished outbox messages | Move to a managed high-availability deployment |
+| `backend/` | Authenticate identities, enforce organization membership and RBAC, custody typed connector credentials, authenticate/bound GitHub evidence, persist incidents and workflows, relay a transactional outbox, execute database-leased jobs, rank causes, validate grounded briefs, enforce approval policy, verify recovery, and version postmortems | Add observability and collaboration adapters |
+| PostgreSQL | Own connector metadata, encrypted credential envelopes, custody events, verified GitHub delivery receipts, incident state, workflows, leases, results, and unpublished outbox messages | Move to a managed high-availability deployment |
 | Redis Streams | Wake workers with at-least-once delivery, consumer groups, pending-message reclaim, and a dead-letter stream | Move to a managed transport and tune retention |
 | `frontend/` | Present the signed organization scope, exact permission receipt, connector custody ledger, evidence, causal rankings, evaluation gates, workflow delivery receipts, recovery receipts, and postmortem document control | Add membership administration |
 | `runbooks/` | Supply versioned procedures to hybrid retrieval | Source grounded mitigation steps |
@@ -76,8 +76,21 @@ Each credential revision is encrypted under a fresh random data-encryption key, 
 wrapped by an exact-version key-encryption key. Authenticated associated data binds the envelope to
 its organization, connector, provider, revision, and key identifier, so copied or edited rows fail
 closed. API responses and allowlisted audit payloads reveal field presence and revision only.
-Validation in Phase 9A checks provider schema and vault integrity without making an external
-request; each production adapter will own its later network and sanitization policy.
+The Phase 9A generic validation checked provider schema and vault integrity without making an
+external request. Phase 9B's GitHub-specific validator now snapshots the connector and credential
+revision, ends the database transaction, performs a bounded App-installation/repository handshake,
+then locks and records the result only if both revisions are still current. Prometheus and Slack
+remain local-only contracts until their own vertical slices.
+
+GitHub webhooks use a separate public authentication boundary. The connector UUID routes the
+delivery but does not authenticate it. PagerAgent caps the raw request, verifies
+`X-Hub-Signature-256` with the encrypted webhook secret before parsing JSON, binds repository and
+installation identity to the connector, rechecks the locked connector and credential revisions,
+and stores only bounded normalized fields plus the body hash and authenticating revisions. A
+composite tenant/connector foreign key enforces ownership at rest. PostgreSQL uniqueness on
+connector and delivery ID makes an exact retry idempotent; reusing a delivery ID with different
+content fails closed. The high-volume provider inbox is separate from the versioned, low-volume
+connector custody ledger.
 
 PostgreSQL is also the workflow source of truth. A workflow enqueue writes the run, initial job, ordered workflow events, and outbox row in the same transaction as the business transition that caused it. Redis does not decide whether work exists; it transports a job identifier after the transaction commits. Losing Redis therefore delays work but does not erase it. In addition to unpublished rows, the relay periodically checks the exact stream ID on the latest stale receipt for a due nonterminal job; it republishes only when that entry is missing. Publication and repair can both create duplicates, so workers treat duplicate delivery as expected.
 
@@ -85,7 +98,14 @@ Each worker claim locks the job row, records a worker identity and expiring leas
 
 The evidence layer stores collection snapshots as content-hashed artifacts and stores derived clusters, causal candidates, commit candidates, and runbook matches separately. Each investigation captures its collector, clusterer, ranker, and retriever versions plus an input hash. Each derived record carries evidence identifiers, so a score can be traced back to telemetry, dependency health, configuration history, deploy history, commit metadata, and the runbook corpus.
 
-Provider interfaces isolate evidence collection from analysis. The demo uses HTTP telemetry, a fixture-backed Git provider, and local Markdown runbooks; production integrations can replace those providers without changing the deterministic ranking contracts.
+Provider interfaces isolate evidence collection from analysis. The default local demo uses HTTP
+telemetry, a fixture-backed Git provider, and local Markdown runbooks. In connector mode, a
+tenant-and-service selector decrypts exactly one enabled GitHub App envelope at the adapter
+boundary and replaces the fixture catalog with bounded normalized REST snapshots and verified
+webhook receipts without changing the deterministic ranking contract. After network I/O it locks
+and compare-and-swaps the connector plus credential revisions through evidence commit, discarding
+results collected across a completed revocation or rotation. Non-local environments must select
+connector mode and never silently fall back to fixtures.
 
 The synthesis provider is also replaceable. With an API key, the OpenAI adapter uses the Responses API and a strict structured-output schema. Without a key, the deterministic provider creates the same typed contract for offline demos. Both outputs pass through the same citation validator. The model produces language only; a deterministic policy derives the action envelope from the top causal signal and matching safety runbook.
 
@@ -237,6 +257,43 @@ configuration or status receipt + sanitized event (one PostgreSQL transaction)
 both paths ──► metadata/detail API: field names only
            └─► validation: authenticated envelope, no provider network request
 ```
+
+The final line describes the Phase 9A generic custody check. GitHub validation is superseded by the
+networked Phase 9B path below.
+
+## Phase 9B GitHub evidence path
+
+```text
+admin validation request
+        │ snapshot connector version + credential revision, decrypt envelope
+        ▼
+end DB transaction → RS256 App JWT → exact installation lookup → repository-scoped token
+        │ fixed GitHub origin, API version, time/byte/request/item limits
+        ▼
+repository read succeeds → tenant-scoped row lock → compare revisions → validation event
+
+GitHub webhook → raw-byte limit → HMAC-SHA256 → repository/installation binding
+        │
+        └──► normalized delivery + body hash → unique PostgreSQL inbox receipt
+
+incident workflow → organization + service binding → one enabled GitHub connector
+        │ no open evidence transaction during network collection
+        ▼
+commits + pull requests + deployments/status + releases + webhook receipts
+        │ re-lock exact revisions; discard patches, bodies, URLs, tokens
+        ▼
+content-hashed artifacts → deterministic commit/cause rankers → cited proposal
+```
+
+The App private key and webhook secret remain inside the Phase 9A envelope. App JWTs and
+installation tokens are ephemeral and never enter a database record, workflow message, evidence
+payload, trace attribute, or error string. GitHub responses are read serially from one bounded page
+per evidence class; redirects and environment proxies are disabled, response bytes and total calls
+are capped, and rate-limit/provider errors are sanitized for the existing durable retry policy.
+
+Telemetry remains the operational observation of the active release. GitHub metadata corroborates
+which changes, pull requests, deployments, and releases surround that observation; it does not
+override recovery gates or create mitigation authority.
 
 New connectors begin disabled. A successful custody validation records a receipt but does not
 silently enable the connector; the administrator makes that state transition explicitly with the

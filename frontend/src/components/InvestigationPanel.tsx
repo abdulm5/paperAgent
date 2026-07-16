@@ -1,4 +1,4 @@
-import type { InvestigationDetail } from "../lib/api";
+import type { EvidenceArtifact, InvestigationDetail } from "../lib/api";
 import { formatTimestamp, titleCase } from "../lib/format";
 import { AuthorityNote } from "./AuthorityNote";
 
@@ -13,6 +13,29 @@ interface InvestigationPanelProps {
 
 function citation(value: string): string {
   return `E-${value.slice(0, 6)}`;
+}
+
+interface GitHubAppProvenance {
+  repository: string;
+  connectorVersion: string | null;
+  credentialVersion: string | null;
+}
+
+function receiptScalar(value: unknown): string | null {
+  return typeof value === "string" || typeof value === "number" ? String(value) : null;
+}
+
+function githubAppProvenance(artifact: EvidenceArtifact): GitHubAppProvenance | null {
+  if (artifact.kind !== "commit_catalog" || artifact.payload.provider !== "github_app") {
+    return null;
+  }
+  const repository = receiptScalar(artifact.payload.repository);
+  if (!repository) return null;
+  return {
+    repository,
+    connectorVersion: receiptScalar(artifact.payload.connector_version),
+    credentialVersion: receiptScalar(artifact.payload.credential_version),
+  };
 }
 
 export function InvestigationPanel({
@@ -206,16 +229,55 @@ export function InvestigationPanel({
       <details className="provenance-drawer">
         <summary>Inspect provenance · {investigation.evidence.length} immutable artifacts</summary>
         <div>
-          {investigation.evidence.map((artifact) => (
-            <article key={artifact.id}>
-              <span>{citation(artifact.id)}</span>
-              <div>
-                <strong>{titleCase(artifact.kind)}</strong>
-                <small>{artifact.source_uri}</small>
-              </div>
-              <code>{artifact.content_hash.slice(0, 12)}</code>
-            </article>
-          ))}
+          {investigation.evidence.map((artifact) => {
+            const githubReceipt = githubAppProvenance(artifact);
+            return (
+              <article key={artifact.id}>
+                <span>{citation(artifact.id)}</span>
+                <div>
+                  <strong>{titleCase(artifact.kind)}</strong>
+                  <small>{artifact.source_uri}</small>
+                </div>
+                <code>{artifact.content_hash.slice(0, 12)}</code>
+                {githubReceipt ? (
+                  <dl
+                    aria-label="GitHub App provenance receipt"
+                    className="github-provenance-receipt"
+                    role="region"
+                  >
+                    <div>
+                      <dt>Provider</dt>
+                      <dd>GitHub App</dd>
+                    </div>
+                    <div>
+                      <dt>Repository</dt>
+                      <dd>{githubReceipt.repository}</dd>
+                    </div>
+                    {githubReceipt.connectorVersion ? (
+                      <div>
+                        <dt>Connector version</dt>
+                        <dd>v{githubReceipt.connectorVersion}</dd>
+                      </div>
+                    ) : null}
+                    {githubReceipt.credentialVersion ? (
+                      <div>
+                        <dt>Credential version</dt>
+                        <dd>v{githubReceipt.credentialVersion}</dd>
+                      </div>
+                    ) : null}
+                    <div className="github-provenance-source">
+                      <dt>Source</dt>
+                      <dd>{artifact.source_uri}</dd>
+                    </div>
+                    <div className="github-provenance-hash">
+                      <dt>Content hash</dt>
+                      <dd>{artifact.content_hash}</dd>
+                    </div>
+                  </dl>
+                ) : null}
+              </article>
+            );
+          })}
         </div>
       </details>
       {error ? <p className="investigation-error" role="alert">{error}</p> : null}

@@ -67,6 +67,51 @@ class Settings(BaseSettings):
         ),
         validation_alias="PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS",
     )
+    github_evidence_mode: Literal["auto", "connector", "fixture"] = Field(
+        default="auto",
+        validation_alias="GITHUB_EVIDENCE_MODE",
+    )
+    github_api_version: str = Field(
+        default="2026-03-10",
+        validation_alias="GITHUB_API_VERSION",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+    )
+    github_http_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=30,
+        validation_alias="GITHUB_HTTP_TIMEOUT_SECONDS",
+    )
+    github_max_response_bytes: int = Field(
+        default=1_048_576,
+        ge=1_024,
+        le=4_194_304,
+        validation_alias="GITHUB_MAX_RESPONSE_BYTES",
+    )
+    github_max_api_requests: int = Field(
+        default=24,
+        ge=6,
+        le=50,
+        validation_alias="GITHUB_MAX_API_REQUESTS",
+    )
+    github_max_commits: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        validation_alias="GITHUB_MAX_COMMITS",
+    )
+    github_max_related_items: int = Field(
+        default=10,
+        ge=1,
+        le=25,
+        validation_alias="GITHUB_MAX_RELATED_ITEMS",
+    )
+    github_evidence_lookback_hours: int = Field(
+        default=24,
+        ge=1,
+        le=168,
+        validation_alias="GITHUB_EVIDENCE_LOOKBACK_HOURS",
+    )
     investigation_telemetry_allowed_origins: str = Field(
         default="",
         validation_alias="PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS",
@@ -203,6 +248,15 @@ class Settings(BaseSettings):
                     "PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS must contain exact HTTP(S) origins"
                 )
 
+        minimum_github_budget = (
+            9 + self.github_max_commits + min(self.github_max_related_items, 6)
+        )
+        if self.github_max_api_requests < minimum_github_budget:
+            raise ValueError(
+                "GITHUB_MAX_API_REQUESTS is too small for the configured bounded "
+                "GitHub evidence pages and one authentication refresh"
+            )
+
         if self.environment.lower() in {"local", "test"}:
             return self
 
@@ -254,6 +308,15 @@ class Settings(BaseSettings):
         if any(not origin.startswith("https://") for origin in connector_origins):
             errors.append(
                 "PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS must contain only HTTPS origins"
+            )
+        if self.github_evidence_mode != "connector":
+            errors.append(
+                "GITHUB_EVIDENCE_MODE must be 'connector' outside local/test environments"
+            )
+        elif "https://api.github.com" not in connector_origins:
+            errors.append(
+                "PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS must include https://api.github.com "
+                "when GitHub connector evidence is enabled"
             )
 
         telemetry_origins = [

@@ -2,12 +2,15 @@ import { afterEach, expect, test, vi } from "vitest";
 
 import {
   createConnector,
+  decideCollaborationOutput,
   decideProposal,
   finalizePostmortem,
   getConnector,
   getConnectorEvents,
   getConnectors,
   getIncidents,
+  getCollaborationOutputs,
+  prepareCollaborationOutputs,
   rotateConnectorCredentials,
   setForbiddenHandler,
   setSessionCsrfToken,
@@ -18,6 +21,8 @@ import {
   validateConnector,
   type PostmortemDetail,
   type PostmortemEditPayload,
+  type CollaborationOutput,
+  type MitigationProposal,
 } from "./api";
 
 afterEach(() => {
@@ -134,6 +139,52 @@ test("signs every cookie-authenticated write with CSRF and never accepts a clien
   for (const [, init] of fetchMock.mock.calls) {
     expect(init?.credentials).toBe("include");
     expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("csrf-memory-only");
+    expect(JSON.parse(String(init?.body))).not.toHaveProperty("actor");
+  }
+});
+
+test("freezes collaboration drafts and signs separate publication decisions", async () => {
+  const fetchMock = vi.fn<
+    (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+  >(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ([]),
+    } as Response));
+  vi.stubGlobal("fetch", fetchMock);
+  setSessionCsrfToken("collaboration-csrf");
+  const proposal = {
+    id: "proposal-1",
+    input_hash: "a".repeat(64),
+  } as MitigationProposal;
+  const output = {
+    id: "output-1",
+    version: 3,
+    content_sha256: "b".repeat(64),
+  } as CollaborationOutput;
+
+  await getCollaborationOutputs("incident-1");
+  await prepareCollaborationOutputs("incident-1", proposal, ["slack_update", "github_issue"]);
+  await decideCollaborationOutput(output, "approve", "Destination and content reviewed.");
+
+  expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+    "/api/v1/incidents/incident-1/collaboration-outputs",
+    "/api/v1/incidents/incident-1/collaboration-outputs",
+    "/api/v1/collaboration-outputs/output-1/decisions",
+  ]);
+  expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+    proposal_id: "proposal-1",
+    expected_proposal_hash: "a".repeat(64),
+    kinds: ["slack_update", "github_issue"],
+  });
+  expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({
+    decision: "approve",
+    expected_version: 3,
+    expected_content_sha256: "b".repeat(64),
+    note: "Destination and content reviewed.",
+  });
+  for (const [, init] of fetchMock.mock.calls.slice(1)) {
+    expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("collaboration-csrf");
     expect(JSON.parse(String(init?.body))).not.toHaveProperty("actor");
   }
 });

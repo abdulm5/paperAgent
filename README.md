@@ -4,11 +4,11 @@ PagerAgent is an evidence-grounded incident-response copilot. It helps an on-cal
 
 ## Project status
 
-**Phase 9C.1 — bounded Prometheus metric evidence.** PagerAgent now turns an encrypted,
-tenant/service-owned Prometheus connector into one bounded, content-hashed metric snapshot. A
-server-owned query catalog prevents arbitrary PromQL, connector revisions fence provider I/O, and
-the live error-rate window can only corroborate an existing causal signal. GitHub evidence remains
-authenticated and bounded; OpenTelemetry/backend-specific logs and traces are the next 9C slice.
+**Phase 9D — durable collaboration outputs.** PagerAgent can now turn a grounded proposal into a
+separately approved Slack update or GitHub issue. Approval atomically enters the existing
+PostgreSQL outbox workflow, leased workers reconcile a stable provider-visible delivery marker
+before every write, and normalized receipts, retries, and dead letters remain visible without
+claiming an impossible cross-provider exactly-once transaction.
 
 ## The interview story
 
@@ -27,9 +27,10 @@ PagerAgent is designed around a simple principle: the model synthesizes evidence
    bounded Prometheus metrics, normalized GitHub evidence, and runbooks, then ranks causal signals.
 7. PagerAgent proposes a cited typed action—or blocks automation when the evidence points outside its authority—without losing work if a process restarts.
 8. An authorized human approves or rejects the proposal. Approval atomically queues a separate mitigation workflow instead of performing the external write in the request.
-9. The worker executes the allow-listed action with a proposal-scoped idempotency key and records recovery verification before the incident is mitigated.
-10. Resolution queues a durable postmortem workflow; the resulting cited report can be revised, finalized, and exported.
-11. The tenant-filtered workflow recorder follows every queue, lease, retry, completion, and dead-letter event through a replayable server-sent event stream.
+9. Slack updates and GitHub issues require another explicit collaboration decision. Approval freezes the grounded content, destination, and connector revisions before atomically entering the outbox.
+10. The worker executes the allow-listed mitigation or reconciles the collaboration delivery marker before one remote write, then records recovery or a normalized provider receipt.
+11. Resolution queues a durable postmortem workflow; the resulting cited report can be revised, finalized, and exported.
+12. The tenant-filtered workflow recorder follows every queue, lease, retry, completion, and dead-letter event through a replayable server-sent event stream.
 
 ## Repository layout
 
@@ -145,6 +146,15 @@ To exercise the explicit command-line approval path as well:
 
 That flag represents the operator decision. PagerAgent records it, rolls back only to the allow-listed `stable-v1` release, sends 15 recovery canaries including the failing cohort, and marks the incident mitigated only if every canary succeeds. The script then resolves the incident, waits for the automatic grounded postmortem, verifies its Markdown export, and prints the temporary export path. The normal dashboard path keeps approval, report editing, and finalization interactive.
 
+The dashboard also exposes the independent Phase 9D communication boundary. Configure and
+validate a Slack service/channel connector or opt an existing GitHub App connector into issue
+creation, then prepare an output from the grounded proposal. A responder can prepare the exact
+server-built preview; an incident commander separately approves or rejects it. The panel follows
+queued, delivering, retry, delivered, and dead-letter states and displays only the normalized
+Slack timestamp or GitHub issue receipt. To demonstrate the crash window, interrupt a worker after
+the remote write: the next attempt searches for the stable output UUID and records a reconciled
+receipt instead of creating another message or issue.
+
 To make the durability boundary visible during a demo, run the dedicated failure-and-recovery walkthrough:
 
 ```bash
@@ -183,10 +193,13 @@ cd frontend && npm install && npm run dev
 9B. GitHub evidence (complete): multiline App-key custody, repository-scoped installation authorization, two-phase provider validation, signed webhook verification, durable replay protection, bounded/rate-aware REST collection, and normalized commit/PR/deployment/release evidence.
 9C.1. Prometheus evidence (complete): server-owned PromQL catalog, bounded range collection, revision-fenced tenant/service selection, immutable metric snapshots, and conservative causal corroboration.
 9C.2. Logs and traces (planned): bounded, backend-specific APIs for OpenTelemetry-derived telemetry.
-9D. Collaboration outputs (planned): durable, idempotent Slack updates and GitHub issue creation.
+9D. Collaboration outputs (complete): separately approved server-grounded Slack updates and GitHub issues, atomic outbox enqueueing, revision-fenced workers, bounded provider-marker reconciliation, normalized delivery receipts, retries, and dead letters.
 9E. Hosted identity and administration (planned): provider-specific OIDC authorization-code/PKCE login and membership administration.
 
-See [the Phase 9C.1 walkthrough](docs/milestones/09c-observability-evidence.md) and
+See [the Phase 9D walkthrough](docs/milestones/09d-durable-collaboration.md) and
+[ADR 0013](docs/decisions/0013-collaboration-delivery-is-reconciled-not-exactly-once.md) for the
+separate communication approval, provider-marker reconciliation, and dead-letter boundary.
+[The Phase 9C.1 walkthrough](docs/milestones/09c-observability-evidence.md) and
 [ADR 0012](docs/decisions/0012-observability-evidence-is-bounded-before-it-is-causal.md) for the
 Prometheus query, network, and causal boundary. [The Phase 9B walkthrough](docs/milestones/09b-github-evidence.md)
 and [ADR 0011](docs/decisions/0011-github-deliveries-are-authenticated-idempotent-inputs.md) cover

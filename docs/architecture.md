@@ -35,10 +35,10 @@ The LLM is deliberately downstream of evidence gathering. It can summarize, comp
 | Component | Current responsibility | Later responsibility |
 | --- | --- | --- |
 | `simulator/` | Reproduce code, configuration, and upstream-dependency failures | Add production-like distributed services |
-| `backend/` | Authenticate identities, enforce organization membership and RBAC, custody typed connector credentials, collect bounded GitHub and Prometheus evidence, persist incidents and workflows, relay a transactional outbox, execute database-leased jobs, rank causes, validate grounded briefs, enforce approval policy, verify recovery, and version postmortems | Add backend-specific log/trace and collaboration adapters |
-| PostgreSQL | Own connector metadata, encrypted credential envelopes, custody events, verified GitHub delivery receipts, content-hashed evidence, incident state, workflows, leases, results, and unpublished outbox messages | Move to a managed high-availability deployment |
+| `backend/` | Authenticate identities, enforce organization membership and RBAC, custody typed connector credentials, collect bounded GitHub and Prometheus evidence, persist incidents and workflows, relay a transactional outbox, execute database-leased jobs, rank causes, validate grounded briefs, enforce approval policy, deliver approved collaboration outputs, verify recovery, and version postmortems | Add backend-specific log/trace adapters |
+| PostgreSQL | Own connector metadata, encrypted credential envelopes, custody events, verified inbound and outbound provider receipts, content-hashed evidence, incident state, workflows, leases, results, and unpublished outbox messages | Move to a managed high-availability deployment |
 | Redis Streams | Wake workers with at-least-once delivery, consumer groups, pending-message reclaim, and a dead-letter stream | Move to a managed transport and tune retention |
-| `frontend/` | Present the signed organization scope, exact permission receipt, connector custody ledger, evidence, causal rankings, evaluation gates, workflow delivery receipts, recovery receipts, and postmortem document control | Add membership administration |
+| `frontend/` | Present the signed organization scope, exact permission receipt, connector custody ledger, evidence, causal rankings, evaluation gates, workflow and collaboration delivery receipts, recovery receipts, and postmortem document control | Add membership administration |
 | `runbooks/` | Supply versioned procedures to hybrid retrieval | Source grounded mitigation steps |
 | `scenarios/` | Define versioned simulation, ground truth, adversarial cases, and thresholds | Grow a reviewed incident corpus |
 | `evals/` | Score cause ranking, retrieval, impact, traceability, action safety, authority, and resilience | Add model-provider comparison and historical trends |
@@ -77,10 +77,10 @@ wrapped by an exact-version key-encryption key. Authenticated associated data bi
 its organization, connector, provider, revision, and key identifier, so copied or edited rows fail
 closed. API responses and allowlisted audit payloads reveal field presence and revision only.
 The Phase 9A generic validation checked provider schema and vault integrity without making an
-external request. GitHub and Prometheus validators now snapshot the connector and credential
+external request. GitHub, Prometheus, and Slack validators now snapshot the connector and credential
 revision, end the database transaction, perform their bounded provider handshake, then lock and
-record the result only if both revisions are still current. Slack remains a local-only contract
-until its own vertical slice.
+record the result only if both revisions are still current. GitHub issue-write authorization is
+tested only when that explicit connector capability is enabled.
 
 Prometheus connector origins must exactly match the server allowlist; requests append only fixed
 API paths, reject redirects, ignore environment proxies, and use ordinary TLS verification.
@@ -116,6 +116,14 @@ for configured provider evidence.
 The synthesis provider is also replaceable. With an API key, the OpenAI adapter uses the Responses API and a strict structured-output schema. Without a key, the deterministic provider creates the same typed contract for offline demos. Both outputs pass through the same citation validator. The model produces language only; a deterministic policy derives the action envelope from the top causal signal and matching safety runbook.
 
 Approval and execution are separate durable records. An approval is committed before any external write. The checkout simulator executor accepts only typed rollback or feature-flag-disable envelopes for `checkout-api`, uses a proposal-scoped idempotency key, then sends a canary cohort that includes digital wallets. Upstream-dependency causes always produce `escalate_only`, and low-confidence or missing evidence cannot unlock a write. A successful HTTP call is insufficient: telemetry verification must pass before the incident moves from investigating to mitigated.
+
+Collaboration approval is separate again: mitigation authority never implies authority to publish
+to Slack or GitHub. PagerAgent constructs the draft from grounded proposal fields, freezes its
+destination, hash, connector revision, and credential revision, and records an explicit human
+decision. Approval atomically queues the existing durable workflow; rejection queues nothing. The
+provider adapter checkpoints delivery before network I/O, reconciles a stable output UUID in a
+bounded remote history, and then either returns the existing receipt or performs one marked write.
+This closes the common retry window without claiming a cross-system exactly-once transaction.
 
 In durable mode, approval and mitigation-workflow enqueueing share one transaction and the HTTP request returns before execution. Investigation and proposal records carry a unique nullable workflow-job identity, postmortems retain their one-per-incident constraint, and mitigation executions retain a unique proposal and idempotency key. These guards turn at-least-once handler invocation into effectively-once persisted results. The simulator caches an idempotency key's mutation result and rejects reuse for another mutation, which covers the demo's external-write replay window. A production action adapter must provide a durable downstream idempotency contract or reconcile current target state; exactly-once delivery cannot be created by Redis or PostgreSQL alone.
 
@@ -327,6 +335,42 @@ provider data without holding a database lock during network I/O.
 This is a Prometheus metrics slice, not a generic OpenTelemetry query implementation. Logs and
 traces require explicit backend APIs and their own authentication, pagination, redaction, and
 resource-limit contracts.
+
+## Phase 9D durable collaboration path
+
+```text
+grounded proposal + tenant/service
+        │ server selects enabled connector and builds bounded content
+        ▼
+pending output + destination + content hash + exact connector revisions
+        │ separate collaboration permission and optimistic decision
+        ├── reject ──► decision only
+        └── approve ─► decision + workflow + job + outbox (one DB transaction)
+                                      │ identifier-only Redis message
+                                      ▼
+leased/fenced worker → revision check → persisted delivering checkpoint
+                                      │
+                    bounded provider-marker reconciliation
+                         │                         │
+                 existing receipt             no marker
+                         │                         └──► one marked write
+                         └──────────────┬──────────┘
+                                        ▼
+                         normalized receipt / retry / dead letter
+```
+
+Slack receives the output UUID as both `client_msg_id` and opaque PagerAgent metadata. GitHub
+receives it as a hidden issue-body marker. Every attempt searches one bounded recent window before
+writing; an incomplete scan or contradictory match fails closed. This is intentionally described
+as reconciliation-backed, effectively-once domain behavior over at-least-once workflow delivery.
+PostgreSQL cannot atomically commit with either provider, so the architecture makes that ambiguity
+and its repair receipt visible instead of labeling it exactly once.
+
+Connector credentials are decrypted only at the final adapter boundary. Redis sees only the
+internal output ID, and workflow failures carry an allowlisted provider error code rather than raw
+response text. Provider calls happen outside database locks, while connector revision checks and
+workflow attempt fencing prevent a completed revocation or expired worker from committing stale
+authority. Mitigation and collaboration decisions remain independent append-only events.
 
 New connectors begin disabled. A successful custody validation records a receipt but does not
 silently enable the connector; the administrator makes that state transition explicitly with the

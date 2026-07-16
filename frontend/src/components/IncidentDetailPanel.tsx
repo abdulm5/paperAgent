@@ -1,6 +1,9 @@
 import { useState } from "react";
 
 import type {
+  CollaborationDecision,
+  CollaborationOutput,
+  CollaborationOutputKind,
   IncidentDetail,
   IncidentStatus,
   InvestigationDetail,
@@ -14,6 +17,7 @@ import type {
 } from "../lib/api";
 import { formatDuration, formatTimestamp, titleCase } from "../lib/format";
 import { InvestigationPanel } from "./InvestigationPanel";
+import { CollaborationPanel } from "./CollaborationPanel";
 import { ProposalPanel } from "./ProposalPanel";
 import { PostmortemPanel } from "./PostmortemPanel";
 import { WorkflowDispatch } from "./WorkflowDispatch";
@@ -47,6 +51,16 @@ interface IncidentDetailPanelProps {
   proposalError: string | null;
   onGenerateProposal: () => Promise<void>;
   onProposalDecision: (decision: ProposalDecision, note: string) => Promise<void>;
+  collaborationOutputs: CollaborationOutput[];
+  collaborationLoading: boolean;
+  collaborationActing: string | null;
+  collaborationError: string | null;
+  onPrepareCollaboration: (kinds: CollaborationOutputKind[]) => Promise<void>;
+  onCollaborationDecision: (
+    output: CollaborationOutput,
+    decision: CollaborationDecision,
+    note: string,
+  ) => Promise<void>;
   postmortem: PostmortemDetail | null;
   postmortemLoading: boolean;
   postmortemActing: boolean;
@@ -78,6 +92,12 @@ export function IncidentDetailPanel({
   proposalError,
   onGenerateProposal,
   onProposalDecision,
+  collaborationOutputs,
+  collaborationLoading,
+  collaborationActing,
+  collaborationError,
+  onPrepareCollaboration,
+  onCollaborationDecision,
   postmortem,
   postmortemLoading,
   postmortemActing,
@@ -212,6 +232,18 @@ export function IncidentDetailPanel({
         loading={proposalLoading}
         onDecision={onProposalDecision}
         onGenerate={onGenerateProposal}
+        proposal={proposal}
+      />
+
+      <CollaborationPanel
+        acting={collaborationActing}
+        canDecide={permissions.includes("collaboration.decide")}
+        canPrepare={permissions.includes("collaboration.prepare")}
+        error={collaborationError}
+        loading={collaborationLoading}
+        onDecision={onCollaborationDecision}
+        onPrepare={onPrepareCollaboration}
+        outputs={collaborationOutputs}
         proposal={proposal}
       />
 

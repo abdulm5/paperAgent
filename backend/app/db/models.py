@@ -362,6 +362,12 @@ class IncidentRecord(Base):
         order_by="MitigationProposalRecord.created_at",
         passive_deletes=True,
     )
+    collaboration_outputs: Mapped[list["CollaborationOutputRecord"]] = relationship(
+        back_populates="incident",
+        cascade="all, delete-orphan",
+        order_by="CollaborationOutputRecord.requested_at",
+        passive_deletes=True,
+    )
     postmortem: Mapped["PostmortemRecord | None"] = relationship(
         back_populates="incident",
         cascade="all, delete-orphan",
@@ -643,6 +649,12 @@ class MitigationProposalRecord(Base):
         uselist=False,
         passive_deletes=True,
     )
+    collaboration_outputs: Mapped[list["CollaborationOutputRecord"]] = relationship(
+        back_populates="proposal",
+        cascade="all, delete-orphan",
+        order_by="CollaborationOutputRecord.requested_at",
+        passive_deletes=True,
+    )
 
 
 class ProposalDecisionRecord(Base):
@@ -664,6 +676,167 @@ class ProposalDecisionRecord(Base):
     )
 
     proposal: Mapped[MitigationProposalRecord] = relationship(back_populates="decisions")
+
+
+class CollaborationOutputRecord(Base):
+    __tablename__ = "collaboration_outputs"
+    __table_args__ = (
+        Index(
+            "ix_collaboration_outputs_incident_requested",
+            "incident_id",
+            "requested_at",
+        ),
+        Index(
+            "ix_collaboration_outputs_status_requested",
+            "status",
+            "requested_at",
+        ),
+        UniqueConstraint(
+            "proposal_id",
+            "kind",
+            name="uq_collaboration_outputs_proposal_kind",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "connector_id"],
+            ["connectors.organization_id", "connectors.id"],
+            name="fk_collaboration_outputs_tenant_connector",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "kind IN ('slack_update', 'github_issue')",
+            name="ck_collaboration_outputs_kind",
+        ),
+        CheckConstraint(
+            "provider IN ('slack', 'github')",
+            name="ck_collaboration_outputs_provider",
+        ),
+        CheckConstraint(
+            "(kind = 'slack_update' AND provider = 'slack') OR "
+            "(kind = 'github_issue' AND provider = 'github')",
+            name="ck_collaboration_outputs_kind_provider",
+        ),
+        CheckConstraint(
+            "status IN ('pending_approval', 'rejected', 'queued', 'delivering', "
+            "'retry_scheduled', 'delivered', 'dead_lettered')",
+            name="ck_collaboration_outputs_status",
+        ),
+        CheckConstraint("version > 0", name="ck_collaboration_outputs_version_positive"),
+        CheckConstraint(
+            "connector_version > 0 AND credential_version > 0",
+            name="ck_collaboration_outputs_connector_versions_positive",
+        ),
+        CheckConstraint(
+            "length(content_sha256) = 64",
+            name="ck_collaboration_outputs_content_hash_length",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    incident_id: Mapped[UUID] = mapped_column(
+        ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False
+    )
+    proposal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("mitigation_proposals.id", ondelete="CASCADE"), nullable=False
+    )
+    connector_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    workflow_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="SET NULL"), unique=True
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    destination: Mapped[str] = mapped_column(String(500), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(json_document, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    connector_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    credential_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(500))
+
+    incident: Mapped[IncidentRecord] = relationship(back_populates="collaboration_outputs")
+    proposal: Mapped[MitigationProposalRecord] = relationship(
+        back_populates="collaboration_outputs"
+    )
+    decisions: Mapped[list["CollaborationDecisionRecord"]] = relationship(
+        back_populates="output",
+        cascade="all, delete-orphan",
+        order_by="CollaborationDecisionRecord.created_at",
+        passive_deletes=True,
+    )
+    delivery: Mapped["CollaborationDeliveryRecord | None"] = relationship(
+        back_populates="output",
+        cascade="all, delete-orphan",
+        uselist=False,
+        passive_deletes=True,
+    )
+
+
+class CollaborationDecisionRecord(Base):
+    __tablename__ = "collaboration_decisions"
+    __table_args__ = (
+        Index(
+            "ix_collaboration_decisions_output_created",
+            "output_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    output_id: Mapped[UUID] = mapped_column(
+        ForeignKey("collaboration_outputs.id", ondelete="CASCADE"), nullable=False
+    )
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    actor: Mapped[str] = mapped_column(String(100), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    output: Mapped[CollaborationOutputRecord] = relationship(back_populates="decisions")
+
+
+class CollaborationDeliveryRecord(Base):
+    __tablename__ = "collaboration_deliveries"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('prepared', 'delivering', 'retry_scheduled', 'delivered', "
+            "'dead_lettered')",
+            name="ck_collaboration_deliveries_status",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_collaboration_deliveries_attempt_count_nonnegative",
+        ),
+    )
+
+    output_id: Mapped[UUID] = mapped_column(
+        ForeignKey("collaboration_outputs.id", ondelete="CASCADE"), primary_key=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(
+        String(100), nullable=False, unique=True
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    provider_receipt: Mapped[dict[str, Any]] = mapped_column(
+        json_document, nullable=False, default=dict
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(64))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    output: Mapped[CollaborationOutputRecord] = relationship(back_populates="delivery")
 
 
 class MitigationExecutionRecord(Base):

@@ -26,6 +26,8 @@ class Permission(StrEnum):
     CONNECTORS_READ = "connectors.read"
     CONNECTORS_MANAGE = "connectors.manage"
     CONNECTORS_VALIDATE = "connectors.validate"
+    COLLABORATION_PREPARE = "collaboration.prepare"
+    COLLABORATION_DECIDE = "collaboration.decide"
 
 
 class Principal(BaseModel):

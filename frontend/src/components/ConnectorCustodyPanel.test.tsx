@@ -49,6 +49,7 @@ const connector: ConnectorDetail = {
     repository: "pageragent/core",
     app_id: "42",
     installation_id: "84",
+    issue_creation_enabled: false,
   },
   credential_fields: ["private_key"],
   credential_version: 1,
@@ -115,7 +116,7 @@ beforeEach(() => {
         id: "33333333-3333-4333-8333-333333333333",
         name: "Incident communications",
         provider: "slack",
-        configuration: { channel: "#incidents" },
+        configuration: { service: "checkout-api", channel: "C0123456789" },
         credential_fields: ["bot_token"],
         version: 1,
       });
@@ -169,7 +170,12 @@ test("creates the selected provider contract with a blank-after-submit secret in
     target: { value: "Incident communications" },
   });
   fireEvent.change(createForm.getByLabelText("Provider"), { target: { value: "slack" } });
-  fireEvent.change(createForm.getByLabelText(/Channel/), { target: { value: "#incidents" } });
+  fireEvent.change(createForm.getByLabelText(/Service binding/), {
+    target: { value: "checkout-api" },
+  });
+  fireEvent.change(createForm.getByLabelText(/Channel ID/), {
+    target: { value: "C0123456789" },
+  });
   fireEvent.change(createForm.getByLabelText("Bot token (bot_token, write only)"), {
     target: { value: "xoxb-ui-sentinel" },
   });
@@ -184,7 +190,7 @@ test("creates the selected provider contract with a blank-after-submit secret in
   expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({
     name: "Incident communications",
     provider: "slack",
-    configuration: { channel: "#incidents" },
+    configuration: { service: "checkout-api", channel: "C0123456789" },
     credentials: { bot_token: "xoxb-ui-sentinel" },
   });
   expect(document.body).not.toHaveTextContent("xoxb-ui-sentinel");
@@ -253,6 +259,7 @@ test("preserves an LF PEM exactly when sealing the current GitHub App contract",
   });
   fireEvent.change(createForm.getByLabelText(/App ID/), { target: { value: "42" } });
   fireEvent.change(createForm.getByLabelText(/Installation ID/), { target: { value: "84" } });
+  fireEvent.click(createForm.getByRole("checkbox", { name: /Allow incident issue creation/ }));
   const privateKeyInput = createForm.getByLabelText("Private key (private_key, write only)");
   expect(privateKeyInput.tagName).toBe("TEXTAREA");
   fireEvent.paste(privateKeyInput, {
@@ -277,6 +284,7 @@ test("preserves an LF PEM exactly when sealing the current GitHub App contract",
       repository: "pageragent/core",
       app_id: "42",
       installation_id: "84",
+      issue_creation_enabled: true,
     },
     credentials: { private_key: privateKey, webhook_secret: webhookSecret },
   });

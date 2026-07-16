@@ -217,6 +217,60 @@ export interface MitigationProposal {
   execution: MitigationExecution | null;
 }
 
+export type CollaborationOutputKind = "slack_update" | "github_issue";
+export type CollaborationDecision = "approve" | "reject";
+export type CollaborationOutputStatus =
+  | "pending_approval"
+  | "rejected"
+  | "queued"
+  | "delivering"
+  | "retry_scheduled"
+  | "delivered"
+  | "dead_lettered";
+
+export interface CollaborationDecisionDetail {
+  id: string;
+  decision: CollaborationDecision;
+  actor: string;
+  note: string | null;
+  created_at: string;
+}
+
+export interface CollaborationDeliveryReceipt {
+  idempotency_key: string;
+  status: string;
+  attempt_count: number;
+  provider_receipt: Record<string, unknown>;
+  last_error_code: string | null;
+  started_at: string | null;
+  updated_at: string;
+  delivered_at: string | null;
+}
+
+export interface CollaborationOutput {
+  id: string;
+  incident_id: string;
+  proposal_id: string;
+  connector_id: string;
+  workflow_run_id: string | null;
+  kind: CollaborationOutputKind;
+  provider: "slack" | "github";
+  status: CollaborationOutputStatus;
+  version: number;
+  destination: string;
+  payload: Record<string, unknown>;
+  content_sha256: string;
+  connector_version: number;
+  credential_version: number;
+  requested_by: string;
+  requested_at: string;
+  decided_at: string | null;
+  delivered_at: string | null;
+  failure_reason: string | null;
+  decisions: CollaborationDecisionDetail[];
+  delivery: CollaborationDeliveryReceipt | null;
+}
+
 export type PostmortemStatus = "draft" | "final";
 export type PreventionPriority = "P0" | "P1" | "P2" | "P3";
 
@@ -432,6 +486,8 @@ export type Permission =
   | "investigations.run"
   | "proposals.generate"
   | "mitigations.decide"
+  | "collaboration.prepare"
+  | "collaboration.decide"
   | "postmortems.generate"
   | "postmortems.edit"
   | "postmortems.finalize"
@@ -476,14 +532,14 @@ export interface ConnectorEvent {
 export interface ConnectorCreatePayload {
   name: string;
   provider: ConnectorProvider;
-  configuration: Record<string, string>;
+  configuration: Record<string, string | boolean>;
   credentials: Record<string, string>;
 }
 
 export interface ConnectorUpdatePayload {
   expected_version: number;
   name?: string;
-  configuration?: Record<string, string>;
+  configuration?: Record<string, string | boolean>;
   enabled?: boolean;
 }
 
@@ -804,6 +860,51 @@ export function decideProposal(
       note: note || null,
     }),
   });
+}
+
+export function getCollaborationOutputs(
+  incidentId: string,
+): Promise<CollaborationOutput[]> {
+  return request<CollaborationOutput[]>(
+    `/api/v1/incidents/${incidentId}/collaboration-outputs`,
+  );
+}
+
+export function prepareCollaborationOutputs(
+  incidentId: string,
+  proposal: Pick<MitigationProposal, "id" | "input_hash">,
+  kinds: CollaborationOutputKind[],
+): Promise<CollaborationOutput[]> {
+  return request<CollaborationOutput[]>(
+    `/api/v1/incidents/${incidentId}/collaboration-outputs`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        proposal_id: proposal.id,
+        expected_proposal_hash: proposal.input_hash,
+        kinds,
+      }),
+    },
+  );
+}
+
+export function decideCollaborationOutput(
+  output: Pick<CollaborationOutput, "id" | "version" | "content_sha256">,
+  decision: CollaborationDecision,
+  note: string,
+): Promise<CollaborationOutput> {
+  return request<CollaborationOutput>(
+    `/api/v1/collaboration-outputs/${output.id}/decisions`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        decision,
+        expected_version: output.version,
+        expected_content_sha256: output.content_sha256,
+        note: note || null,
+      }),
+    },
+  );
 }
 
 export async function getPostmortem(

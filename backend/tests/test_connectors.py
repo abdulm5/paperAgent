@@ -40,6 +40,22 @@ class StubPrometheusProvider:
         return None
 
 
+class StubGitHubIssuePublisher:
+    def validate(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+class StubSlackPublisher:
+    def validate(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
 @pytest.fixture(autouse=True)
 def stub_github_provider_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -50,6 +66,14 @@ def stub_github_provider_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
         "app.services.connectors.build_prometheus_provider",
         lambda _configuration, _credentials: StubPrometheusProvider(),
     )
+    monkeypatch.setattr(
+        "app.services.connectors.build_github_issue_publisher",
+        lambda _configuration, _credentials: StubGitHubIssuePublisher(),
+    )
+    monkeypatch.setattr(
+        "app.services.connectors.build_slack_publisher",
+        lambda _configuration, _credentials: StubSlackPublisher(),
+    )
 
 
 def github_connector(
@@ -58,6 +82,7 @@ def github_connector(
     secret: str = SECRET_SENTINEL,
     service: str = "checkout-api",
     repository: str = "pageragent/checkout",
+    issue_creation_enabled: bool = False,
 ) -> dict[str, object]:
     return {
         "name": name,
@@ -67,6 +92,7 @@ def github_connector(
             "repository": repository,
             "app_id": 1001,
             "installation_id": 2002,
+            "issue_creation_enabled": issue_creation_enabled,
             "api_url": "https://api.github.com",
         },
         "credentials": {
@@ -90,6 +116,25 @@ def prometheus_connector(
             "base_url": "http://prometheus:9090",
         },
         "credentials": {"bearer_token": token},
+    }
+
+
+def slack_connector(
+    *,
+    name: str = "Checkout incident channel",
+    service: str = "checkout-api",
+    channel: str = "C0123456789",
+    token: str = "xoxb-test-token",
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "provider": "slack",
+        "configuration": {
+            "service": service,
+            "channel": channel,
+            "api_url": "https://slack.com",
+        },
+        "credentials": {"bot_token": token},
     }
 
 
@@ -425,10 +470,11 @@ def test_prometheus_validation_discards_a_stale_handshake_result(
             {
                 "name": "Incident Slack",
                 "provider": "slack",
-                "configuration": {
-                    "channel": "C012345",
-                    "api_url": "https://slack.com",
-                },
+                    "configuration": {
+                        "service": "checkout-api",
+                        "channel": "C0123456789",
+                        "api_url": "https://slack.com",
+                    },
                 "credentials": {"bot_token": "xoxb-test"},
             },
             "bot_token",
@@ -486,6 +532,121 @@ def test_prometheus_connector_requires_live_validation_and_unique_service_bindin
     assert conflict.json()["detail"] == (
         "Another enabled Prometheus connector already owns this service binding"
     )
+
+
+def test_slack_connector_requires_live_validation_and_unique_service_binding() -> None:
+    client = TestClient(app)
+    first = client.post("/api/v1/connectors", json=slack_connector()).json()
+
+    validated_response = client.post(
+        f"/api/v1/connectors/{first['id']}/validate",
+        json={"expected_version": first["version"]},
+    )
+    assert validated_response.status_code == 200
+    validated = validated_response.json()
+    assert validated["last_validation_ok"] is True
+    assert "Slack bot identity" in validated["last_validation_message"]
+    enabled = client.patch(
+        f"/api/v1/connectors/{first['id']}",
+        json={"expected_version": validated["version"], "enabled": True},
+    )
+    assert enabled.status_code == 200
+
+    second = client.post(
+        "/api/v1/connectors",
+        json=slack_connector(name="Duplicate checkout incident channel", channel="G0123456789"),
+    ).json()
+    second = client.post(
+        f"/api/v1/connectors/{second['id']}/validate",
+        json={"expected_version": second["version"]},
+    ).json()
+    conflict = client.patch(
+        f"/api/v1/connectors/{second['id']}",
+        json={"expected_version": second["version"], "enabled": True},
+    )
+
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == (
+        "Another enabled Slack connector already owns this service binding"
+    )
+
+
+def test_github_issue_capability_requires_a_separate_write_handshake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validations: list[str] = []
+
+    class RecordingGitHubIssuePublisher:
+        def validate(self) -> None:
+            validations.append("issues:write")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "app.services.connectors.build_github_issue_publisher",
+        lambda _configuration, _credentials: RecordingGitHubIssuePublisher(),
+    )
+    client = TestClient(app)
+
+    read_only = client.post(
+        "/api/v1/connectors",
+        json=github_connector(name="Read-only GitHub"),
+    ).json()
+    read_only = client.post(
+        f"/api/v1/connectors/{read_only['id']}/validate",
+        json={"expected_version": read_only["version"]},
+    ).json()
+    assert validations == []
+    assert "repository read handshake" in read_only["last_validation_message"]
+
+    writer = client.post(
+        "/api/v1/connectors",
+        json=github_connector(
+            name="Issue-writing GitHub",
+            repository="pageragent/incident-tracker",
+            issue_creation_enabled=True,
+        ),
+    ).json()
+    writer_response = client.post(
+        f"/api/v1/connectors/{writer['id']}/validate",
+        json={"expected_version": writer["version"]},
+    )
+
+    assert writer_response.status_code == 200
+    assert validations == ["issues:write"]
+    assert "issue-write handshakes passed" in writer_response.json()[
+        "last_validation_message"
+    ]
+
+
+def test_failed_collaboration_provider_validation_is_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingSlackPublisher:
+        def validate(self) -> None:
+            raise RuntimeError(f"Slack response leaked {SECRET_SENTINEL}")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "app.services.connectors.build_slack_publisher",
+        lambda _configuration, _credentials: FailingSlackPublisher(),
+    )
+    client = TestClient(app)
+    created = client.post("/api/v1/connectors", json=slack_connector()).json()
+
+    response = client.post(
+        f"/api/v1/connectors/{created['id']}/validate",
+        json={"expected_version": created["version"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["last_validation_ok"] is False
+    assert response.json()["status"] == "invalid"
+    assert SECRET_SENTINEL not in response.text
+    assert "Slack response" not in response.text
 
 
 def test_failed_prometheus_handshake_is_sanitized_and_disables_connector(

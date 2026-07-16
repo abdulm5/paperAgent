@@ -9,6 +9,7 @@ import { IdentityCheckpoint } from "./components/IdentityCheckpoint";
 import {
   ApiError,
   createDevSession,
+  decideCollaborationOutput,
   decideProposal,
   deleteAuthSession,
   finalizePostmortem,
@@ -21,9 +22,11 @@ import {
   getEvaluationScorecard,
   getLatestInvestigation,
   getLatestProposal,
+  getCollaborationOutputs,
   getPostmortem,
   getIncidentWorkflows,
   hasPermission,
+  prepareCollaborationOutputs,
   runInvestigation,
   setForbiddenHandler,
   setSessionCsrfToken,
@@ -32,6 +35,9 @@ import {
   transitionIncident,
   updatePostmortem,
   type AuthSession,
+  type CollaborationDecision,
+  type CollaborationOutput,
+  type CollaborationOutputKind,
   type DevPersona,
   type IncidentDetail,
   type IncidentStatus,
@@ -334,6 +340,10 @@ function IncidentLedger({
   const [proposalLoading, setProposalLoading] = useState(false);
   const [proposalActing, setProposalActing] = useState(false);
   const [proposalError, setProposalError] = useState<string | null>(null);
+  const [collaborationOutputs, setCollaborationOutputs] = useState<CollaborationOutput[]>([]);
+  const [collaborationLoading, setCollaborationLoading] = useState(false);
+  const [collaborationActing, setCollaborationActing] = useState<string | null>(null);
+  const [collaborationError, setCollaborationError] = useState<string | null>(null);
   const [postmortem, setPostmortem] = useState<PostmortemDetail | null>(null);
   const [postmortemLoading, setPostmortemLoading] = useState(false);
   const [postmortemActing, setPostmortemActing] = useState(false);
@@ -415,6 +425,25 @@ function IncidentLedger({
     }
   }, []);
 
+  const loadCollaboration = useCallback(async (incidentId: string) => {
+    setCollaborationLoading(true);
+    try {
+      const nextOutputs = await getCollaborationOutputs(incidentId);
+      if (selectedIdRef.current === incidentId) {
+        setCollaborationOutputs(nextOutputs);
+        setCollaborationError(null);
+      }
+    } catch (error) {
+      if (selectedIdRef.current === incidentId) {
+        setCollaborationError(
+          error instanceof Error ? error.message : "Collaboration receipts are unavailable.",
+        );
+      }
+    } finally {
+      if (selectedIdRef.current === incidentId) setCollaborationLoading(false);
+    }
+  }, []);
+
   const loadPostmortem = useCallback(async (incidentId: string) => {
     setPostmortemLoading(true);
     try {
@@ -473,23 +502,31 @@ function IncidentLedger({
     if (selectedId) {
       setInvestigation(null);
       setProposal(null);
+      setCollaborationOutputs([]);
+      setCollaborationError(null);
+      setCollaborationActing(null);
       setPostmortem(null);
       setWorkflows([]);
       setWorkflowError(null);
       void loadDetail(selectedId);
       void loadInvestigation(selectedId);
       void loadProposal(selectedId);
+      void loadCollaboration(selectedId);
       void loadPostmortem(selectedId);
       void loadWorkflows(selectedId);
     } else {
       setDetail(null);
       setInvestigation(null);
       setProposal(null);
+      setCollaborationOutputs([]);
+      setCollaborationError(null);
+      setCollaborationActing(null);
+      setCollaborationLoading(false);
       setPostmortem(null);
       setWorkflows([]);
       setWorkflowError(null);
     }
-  }, [loadDetail, loadInvestigation, loadPostmortem, loadProposal, loadWorkflows, selectedId]);
+  }, [loadCollaboration, loadDetail, loadInvestigation, loadPostmortem, loadProposal, loadWorkflows, selectedId]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -498,13 +535,14 @@ function IncidentLedger({
         void loadDetail(selectedId);
         void loadInvestigation(selectedId);
         void loadProposal(selectedId);
+        void loadCollaboration(selectedId);
         void loadPostmortem(selectedId);
         void loadWorkflows(selectedId);
       },
       RECONCILIATION_INTERVAL_MS,
     );
     return () => window.clearInterval(reconciliationTimer);
-  }, [loadDetail, loadInvestigation, loadPostmortem, loadProposal, loadWorkflows, selectedId]);
+  }, [loadCollaboration, loadDetail, loadInvestigation, loadPostmortem, loadProposal, loadWorkflows, selectedId]);
 
   useEffect(() => {
     if (typeof EventSource === "undefined") {
@@ -553,6 +591,9 @@ function IncidentLedger({
           if (changedResources.has("proposal")) {
             refreshes.push(loadProposal(update.incident_id));
           }
+          if (changedResources.has("collaboration")) {
+            refreshes.push(loadCollaboration(update.incident_id));
+          }
           if (changedResources.has("postmortem")) {
             refreshes.push(loadPostmortem(update.incident_id));
           }
@@ -575,7 +616,7 @@ function IncidentLedger({
       stream.close();
       onStreamChange(null);
     };
-  }, [loadDetail, loadInvestigation, loadPostmortem, loadProposal, loadQueue, onStreamChange]);
+  }, [loadCollaboration, loadDetail, loadInvestigation, loadPostmortem, loadProposal, loadQueue, onStreamChange]);
 
   async function handleTransition(toStatus: IncidentStatus, note: string) {
     if (!detail) return false;
@@ -644,6 +685,61 @@ function IncidentLedger({
       }
     } finally {
       setProposalActing(false);
+    }
+  }
+
+  async function handlePrepareCollaboration(kinds: CollaborationOutputKind[]) {
+    if (!proposal || !selectedId) return;
+    const incidentId = selectedId;
+    setCollaborationActing("prepare");
+    setCollaborationError(null);
+    try {
+      const prepared = await prepareCollaborationOutputs(incidentId, proposal, kinds);
+      if (selectedIdRef.current === incidentId) {
+        setCollaborationOutputs((current) => {
+          const merged = new Map(current.map((output) => [output.id, output]));
+          prepared.forEach((output) => merged.set(output.id, output));
+          return [...merged.values()];
+        });
+      }
+    } catch (error) {
+      if (!isSessionBoundaryError(error)) {
+        setCollaborationError(
+          error instanceof Error ? error.message : "Collaboration drafts could not be prepared.",
+        );
+        await loadCollaboration(incidentId);
+      }
+    } finally {
+      if (selectedIdRef.current === incidentId) setCollaborationActing(null);
+    }
+  }
+
+  async function handleCollaborationDecision(
+    output: CollaborationOutput,
+    decision: CollaborationDecision,
+    note: string,
+  ) {
+    if (!selectedId) return;
+    const incidentId = selectedId;
+    setCollaborationActing(output.id);
+    setCollaborationError(null);
+    try {
+      const updated = await decideCollaborationOutput(output, decision, note);
+      if (selectedIdRef.current === incidentId) {
+        setCollaborationOutputs((current) => current.map((candidate) => (
+          candidate.id === updated.id ? updated : candidate
+        )));
+      }
+      await loadWorkflows(incidentId);
+    } catch (error) {
+      if (!isSessionBoundaryError(error)) {
+        setCollaborationError(
+          error instanceof Error ? error.message : "Publication decision could not be recorded.",
+        );
+        await loadCollaboration(incidentId);
+      }
+    } finally {
+      if (selectedIdRef.current === incidentId) setCollaborationActing(null);
     }
   }
 
@@ -782,6 +878,10 @@ function IncidentLedger({
           proposalActing={proposalActing}
           proposalError={proposalError}
           proposalLoading={proposalLoading}
+          collaborationActing={collaborationActing}
+          collaborationError={collaborationError}
+          collaborationLoading={collaborationLoading}
+          collaborationOutputs={collaborationOutputs}
           postmortem={postmortem}
           postmortemActing={postmortemActing}
           postmortemError={postmortemError}
@@ -795,6 +895,8 @@ function IncidentLedger({
           onFinalizePostmortem={handleFinalizePostmortem}
           onGenerateProposal={handleGenerateProposal}
           onProposalDecision={handleProposalDecision}
+          onPrepareCollaboration={handlePrepareCollaboration}
+          onCollaborationDecision={handleCollaborationDecision}
           onTransition={handleTransition}
           onRunInvestigation={handleRunInvestigation}
           transitionError={transitionError}

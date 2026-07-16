@@ -76,6 +76,7 @@ class GithubConfiguration(PublicMutationModel):
     )
     app_id: int = Field(gt=0)
     installation_id: int = Field(gt=0)
+    issue_creation_enabled: bool = False
     api_url: Literal["https://api.github.com"] = "https://api.github.com"
 
     @field_validator("repository")
@@ -103,8 +104,13 @@ class PrometheusConfiguration(PublicMutationModel):
 
 
 class SlackConfiguration(PublicMutationModel):
-    channel: str = Field(min_length=1, max_length=200)
-    api_url: str | None = Field(default=None, min_length=1, max_length=500)
+    service: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$",
+    )
+    channel: str = Field(pattern=r"^[CG][A-Z0-9]{8,31}$")
+    api_url: Literal["https://slack.com"] = "https://slack.com"
 
 
 class GithubCredentials(PublicMutationModel):

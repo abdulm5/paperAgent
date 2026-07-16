@@ -27,6 +27,8 @@ from app.domain.connectors import (
     GithubCredentials,
     PrometheusConfiguration,
     PrometheusCredentials,
+    SlackConfiguration,
+    SlackCredentials,
 )
 
 
@@ -36,6 +38,10 @@ class GithubConnectorUnavailableError(Exception):
 
 class PrometheusConnectorUnavailableError(Exception):
     """The public connector ID cannot resolve to a safe Prometheus runtime."""
+
+
+class SlackConnectorUnavailableError(Exception):
+    """The public connector ID cannot resolve to a safe Slack runtime."""
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,16 @@ class PrometheusConnectorRuntime:
     credential_version: int
     configuration: PrometheusConfiguration
     credentials: PrometheusCredentials
+
+
+@dataclass(frozen=True)
+class SlackConnectorRuntime:
+    connector_id: UUID
+    organization_id: UUID
+    connector_version: int
+    credential_version: int
+    configuration: SlackConfiguration
+    credentials: SlackCredentials
 
 
 def load_github_connector_runtime(
@@ -165,6 +181,62 @@ def load_prometheus_connector_runtime(
         raise PrometheusConnectorUnavailableError from error
 
     return PrometheusConnectorRuntime(
+        connector_id=record.id,
+        organization_id=record.organization_id,
+        connector_version=record.version,
+        credential_version=credential.credential_version,
+        configuration=configuration,
+        credentials=credentials,
+    )
+
+
+def load_slack_connector_runtime(
+    session: Session,
+    connector_id: UUID,
+    *,
+    cipher: CredentialCipher | None = None,
+) -> SlackConnectorRuntime:
+    """Load one enabled Slack connector at the final decryption boundary."""
+
+    record = session.scalar(
+        select(ConnectorRecord)
+        .where(
+            ConnectorRecord.id == connector_id,
+            ConnectorRecord.provider == ConnectorProvider.SLACK.value,
+            ConnectorRecord.enabled.is_(True),
+            ConnectorRecord.status == ConnectorStatus.CONFIGURED.value,
+        )
+        .options(selectinload(ConnectorRecord.credential))
+    )
+    if record is None or record.credential is None:
+        raise SlackConnectorUnavailableError
+
+    credential = record.credential
+    try:
+        provider = ConnectorProvider(record.provider)
+        normalized_configuration = validate_configuration(provider, record.configuration)
+        opened_credentials = (cipher or build_credential_cipher()).open(
+            _sealed_credentials(credential),
+            CredentialContext(
+                organization_id=record.organization_id,
+                connector_id=record.id,
+                provider=provider,
+                credential_version=credential.credential_version,
+            ),
+        )
+        normalized_credentials = validate_credentials(provider, opened_credentials)
+        configuration = SlackConfiguration.model_validate(normalized_configuration)
+        credentials = SlackCredentials.model_validate(normalized_credentials)
+    except (
+        ConnectorContractError,
+        CredentialVaultError,
+        TypeError,
+        ValueError,
+        ValidationError,
+    ) as error:
+        raise SlackConnectorUnavailableError from error
+
+    return SlackConnectorRuntime(
         connector_id=record.id,
         organization_id=record.organization_id,
         connector_version=record.version,

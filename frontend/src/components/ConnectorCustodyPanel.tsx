@@ -25,7 +25,10 @@ interface ContractField {
   hint: string;
   inputMode?: "text" | "url";
   rendering?: "single-line" | "multiline";
+  control?: "text" | "checkbox";
 }
+
+type ConfigurationValue = string | boolean;
 
 interface ProviderContract {
   label: string;
@@ -37,12 +40,18 @@ interface ProviderContract {
 const PROVIDER_CONTRACTS: Record<ConnectorProvider, ProviderContract> = {
   github: {
     label: "GitHub App",
-    noun: "repository evidence",
+    noun: "repository evidence and approved issues",
     configuration: [
       { key: "service", label: "Service binding", hint: "checkout-api" },
       { key: "repository", label: "Repository", hint: "owner/repository" },
       { key: "app_id", label: "App ID", hint: "GitHub App identifier" },
       { key: "installation_id", label: "Installation ID", hint: "Organization installation" },
+      {
+        key: "issue_creation_enabled",
+        label: "Allow incident issue creation",
+        hint: "Grant this contract a separate issue-writing purpose",
+        control: "checkbox",
+      },
     ],
     credentials: [
       {
@@ -73,7 +82,8 @@ const PROVIDER_CONTRACTS: Record<ConnectorProvider, ProviderContract> = {
     label: "Slack",
     noun: "incident communications",
     configuration: [
-      { key: "channel", label: "Channel", hint: "#incidents" },
+      { key: "service", label: "Service binding", hint: "checkout-api" },
+      { key: "channel", label: "Channel ID", hint: "C0123456789" },
     ],
     credentials: [
       { key: "bot_token", label: "Bot token", hint: "Workspace-scoped bot token" },
@@ -85,18 +95,28 @@ interface ConnectorCustodyPanelProps {
   session: AuthSession;
 }
 
-function emptyValues(fields: ContractField[]): Record<string, string> {
+function emptyValues(fields: ContractField[]): Record<string, ConfigurationValue> {
+  return Object.fromEntries(
+    fields.map((field) => [field.key, field.control === "checkbox" ? false : ""]),
+  );
+}
+
+function emptySecretValues(fields: ContractField[]): Record<string, string> {
   return Object.fromEntries(fields.map((field) => [field.key, ""]));
 }
 
 function configurationValues(
   detail: ConnectorDetail,
   fields: ContractField[],
-): Record<string, string> {
+): Record<string, ConfigurationValue> {
   return Object.fromEntries(
     fields.map((field) => {
       const value = detail.configuration[field.key];
-      return [field.key, typeof value === "string" || typeof value === "number" ? String(value) : ""];
+      if (field.control === "checkbox") return [field.key, value === true];
+      return [
+        field.key,
+        typeof value === "string" || typeof value === "number" ? String(value) : "",
+      ];
     }),
   );
 }
@@ -127,14 +147,14 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
   const [creating, setCreating] = useState(false);
   const [createProvider, setCreateProvider] = useState<ConnectorProvider>("github");
   const [createName, setCreateName] = useState("");
-  const [createConfiguration, setCreateConfiguration] = useState<Record<string, string>>(
+  const [createConfiguration, setCreateConfiguration] = useState<Record<string, ConfigurationValue>>(
     () => emptyValues(PROVIDER_CONTRACTS.github.configuration),
   );
   const [createCredentials, setCreateCredentials] = useState<Record<string, string>>(
-    () => emptyValues(PROVIDER_CONTRACTS.github.credentials),
+    () => emptySecretValues(PROVIDER_CONTRACTS.github.credentials),
   );
   const [editName, setEditName] = useState("");
-  const [editConfiguration, setEditConfiguration] = useState<Record<string, string>>({});
+  const [editConfiguration, setEditConfiguration] = useState<Record<string, ConfigurationValue>>({});
   const [rotationCredentials, setRotationCredentials] = useState<Record<string, string>>({});
   const organizationIdRef = useRef(session.active_organization.id);
   const selectedIdRef = useRef<string | null>(selectedId);
@@ -260,7 +280,7 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
     setCreating(false);
     setLoading(false);
     setDetailLoading(false);
-    setCreateCredentials(emptyValues(PROVIDER_CONTRACTS[createProvider].credentials));
+    setCreateCredentials(emptySecretValues(PROVIDER_CONTRACTS[createProvider].credentials));
     setRotationCredentials({});
     if (!canRead) {
       return;
@@ -276,7 +296,7 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
   useEffect(() => {
     if (canManage) return;
     setCreating(false);
-    setCreateCredentials(emptyValues(PROVIDER_CONTRACTS[createProvider].credentials));
+    setCreateCredentials(emptySecretValues(PROVIDER_CONTRACTS[createProvider].credentials));
     setRotationCredentials({});
   }, [canManage, createProvider]);
 
@@ -304,7 +324,7 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
   function changeCreateProvider(provider: ConnectorProvider) {
     setCreateProvider(provider);
     setCreateConfiguration(emptyValues(PROVIDER_CONTRACTS[provider].configuration));
-    setCreateCredentials(emptyValues(PROVIDER_CONTRACTS[provider].credentials));
+    setCreateCredentials(emptySecretValues(PROVIDER_CONTRACTS[provider].credentials));
   }
 
   function isCurrentMutation(
@@ -326,7 +346,7 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
     setActing("create");
     setError(null);
     const submittedCredentials = { ...createCredentials };
-    setCreateCredentials(emptyValues(createContract.credentials));
+    setCreateCredentials(emptySecretValues(createContract.credentials));
     try {
       const created = await createConnector({
         name: createName.trim(),
@@ -468,7 +488,7 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
   function closeCreateForm() {
     mutationGenerationRef.current += 1;
     setActing(null);
-    setCreateCredentials(emptyValues(createContract.credentials));
+    setCreateCredentials(emptySecretValues(createContract.credentials));
     setCreating(false);
   }
 
@@ -510,7 +530,7 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
           <h1 id="custody-title">Know what crosses the boundary.</h1>
         </div>
         <p>
-          GitHub App connections now contribute repository evidence through a provider handshake.
+          Provider contracts bind a service to evidence reads or approval-gated collaboration writes.
           PagerAgent records every public contract, sealed credential change, and validation receipt.
         </p>
       </header>
@@ -788,9 +808,9 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
                           ? "This legacy receipt does not attest to a successful validation. Validate again before enabling."
                           : detail.provider === "github"
                             ? "GitHub App provider handshake succeeded."
-                            : detail.provider === "prometheus"
+                          : detail.provider === "prometheus"
                               ? "Prometheus provider handshake succeeded."
-                            : "PagerAgent verified the local contract and sealed-envelope integrity."}
+                              : "Slack provider handshake and channel access check succeeded."}
                     {detail.last_validation_message ? (
                       <span className="validation-server-message">
                         Validation receipt: {detail.last_validation_message}
@@ -812,7 +832,7 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
                       ? "Only administrators can run the GitHub App handshake and vault-integrity check."
                       : detail.provider === "prometheus"
                         ? "Only administrators can run the Prometheus handshake and vault-integrity check."
-                        : "Only administrators can run the local contract and vault-integrity check."}
+                        : "Only administrators can run the Slack handshake, channel-access check, and vault-integrity check."}
                     permission="connectors.validate"
                   />
                 </div>
@@ -848,13 +868,35 @@ export function ConnectorCustodyPanel({ session }: ConnectorCustodyPanelProps) {
   );
 }
 
-interface FieldInputProps {
+interface SecretInputProps {
   field: ContractField;
   onChange: (value: string) => void;
   value: string;
 }
 
-function ContractInput({ field, onChange, value }: FieldInputProps) {
+interface ContractInputProps {
+  field: ContractField;
+  onChange: (value: ConfigurationValue) => void;
+  value: ConfigurationValue;
+}
+
+function ContractInput({ field, onChange, value }: ContractInputProps) {
+  if (field.control === "checkbox") {
+    return (
+      <label className="connector-contract-toggle">
+        <input
+          checked={value === true}
+          onChange={(event) => onChange(event.target.checked)}
+          type="checkbox"
+        />
+        <span>
+          <strong>{field.label}</strong>
+          <small>{field.hint}</small>
+          <code>{field.key}</code>
+        </span>
+      </label>
+    );
+  }
   return (
     <label>
       <span>{field.label} <code>{field.key}</code></span>
@@ -864,13 +906,13 @@ function ContractInput({ field, onChange, value }: FieldInputProps) {
         placeholder={field.hint}
         required
         type={field.inputMode === "url" ? "url" : "text"}
-        value={value}
+        value={String(value)}
       />
     </label>
   );
 }
 
-function SecretInput({ field, onChange, value }: FieldInputProps) {
+function SecretInput({ field, onChange, value }: SecretInputProps) {
   const accessibilityLabel = `${field.label} (${field.key}, write only)`;
   if (field.rendering === "multiline") {
     return (

@@ -10,6 +10,7 @@ class WorkflowType(StrEnum):
     INCIDENT_RESPONSE = "incident_response"
     MITIGATION = "mitigation"
     POSTMORTEM = "postmortem"
+    COLLABORATION = "collaboration"
 
 
 class WorkflowStepType(StrEnum):
@@ -17,6 +18,7 @@ class WorkflowStepType(StrEnum):
     GENERATE_PROPOSAL = "generate_proposal"
     EXECUTE_MITIGATION = "execute_mitigation"
     GENERATE_POSTMORTEM = "generate_postmortem"
+    DELIVER_COLLABORATION_OUTPUT = "deliver_collaboration_output"
 
 
 class WorkflowStatus(StrEnum):

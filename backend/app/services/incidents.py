@@ -12,6 +12,9 @@ from app.core.telemetry import current_trace_id
 from app.db.models import (
     AlertRecord,
     CauseCandidateRecord,
+    CollaborationDecisionRecord,
+    CollaborationDeliveryRecord,
+    CollaborationOutputRecord,
     CommitCandidateRecord,
     ErrorClusterRecord,
     EvidenceArtifactRecord,
@@ -236,6 +239,9 @@ class IncidentService:
         proposal_ids = select(MitigationProposalRecord.id).where(
             MitigationProposalRecord.incident_id.in_(incident_ids)
         )
+        collaboration_output_ids = select(CollaborationOutputRecord.id).where(
+            CollaborationOutputRecord.incident_id.in_(incident_ids)
+        )
         postmortem_ids = select(PostmortemRecord.id).where(
             PostmortemRecord.incident_id.in_(incident_ids)
         )
@@ -263,6 +269,21 @@ class IncidentService:
         )
         self.session.execute(
             delete(PostmortemRecord).where(PostmortemRecord.incident_id.in_(incident_ids))
+        )
+        self.session.execute(
+            delete(CollaborationDecisionRecord).where(
+                CollaborationDecisionRecord.output_id.in_(collaboration_output_ids)
+            )
+        )
+        self.session.execute(
+            delete(CollaborationDeliveryRecord).where(
+                CollaborationDeliveryRecord.output_id.in_(collaboration_output_ids)
+            )
+        )
+        self.session.execute(
+            delete(CollaborationOutputRecord).where(
+                CollaborationOutputRecord.incident_id.in_(incident_ids)
+            )
         )
         self.session.execute(
             delete(MitigationExecutionRecord).where(

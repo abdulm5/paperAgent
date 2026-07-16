@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.config import settings
 from app.core.telemetry import workflow_span
 from app.db.models import (
+    CollaborationOutputRecord,
+    IncidentEventRecord,
     IncidentRecord,
     InvestigationRunRecord,
     MitigationProposalRecord,
@@ -24,9 +26,11 @@ from app.db.models import (
     WorkflowJobRecord,
     WorkflowRunRecord,
 )
+from app.services.collaboration import build_collaboration_service
 from app.services.investigations import build_investigation_service
 from app.services.postmortems import build_postmortem_service
 from app.services.proposals import build_proposal_service
+from app.workflows.errors import PermanentWorkflowError, WorkflowStepError
 from app.workflows.events import acquire_workflow_event_publication_lock
 from app.workflows.fencing import WorkflowFence, WorkflowLeaseLostError
 
@@ -172,6 +176,15 @@ class WorkflowEngine:
                 run.completed_at = now
                 run.updated_at = now
                 run.version += 1
+                self._sync_collaboration_failure(
+                    session,
+                    job,
+                    run,
+                    status="dead_lettered",
+                    error_code="workflow_attempts_exhausted",
+                    message=message,
+                    now=now,
+                )
                 self._append_event(
                     session,
                     run,
@@ -180,7 +193,7 @@ class WorkflowEngine:
                     payload={
                         "attempt": job.attempt_count,
                         "error": message,
-                        "changed_resources": [],
+                        "changed_resources": self._changed_resources(job.step_type),
                     },
                 )
                 session.commit()
@@ -332,6 +345,31 @@ class WorkflowEngine:
                     "proposal_id": str(proposal.id),
                     "status": proposal.status.value,
                 }
+            if job.step_type == "deliver_collaboration_output":
+                output_id = UUID(str(job.payload["collaboration_output_id"]))
+                output_incident_id = session.scalar(
+                    select(CollaborationOutputRecord.incident_id).where(
+                        CollaborationOutputRecord.id == output_id,
+                        CollaborationOutputRecord.organization_id
+                        == claimed.organization_id,
+                    )
+                )
+                if output_incident_id != claimed.incident_id:
+                    raise PermanentWorkflowError(
+                        "Workflow collaboration payload does not belong to the claimed incident",
+                        code="collaboration_payload_scope_mismatch",
+                    )
+                output = build_collaboration_service(
+                    session, claimed.organization_id
+                ).deliver(
+                    output_id,
+                    fence=fence,
+                )
+                return {
+                    "collaboration_output_id": str(output.id),
+                    "provider": output.provider.value,
+                    "status": output.status.value,
+                }
             raise RuntimeError(f"No handler registered for workflow step {job.step_type}")
 
     def _complete(self, claimed: ClaimedJob, result: dict[str, Any]) -> WorkflowExecutionResult:
@@ -408,7 +446,12 @@ class WorkflowEngine:
 
     def _fail(self, claimed: ClaimedJob, error: Exception) -> WorkflowExecutionResult:
         now = self.clock()
-        message = f"{type(error).__name__}: {error}"[:2_000]
+        if isinstance(error, WorkflowStepError):
+            error_code = error.code
+            message = f"{error.code}: {error}"[:2_000]
+        else:
+            error_code = "workflow_step_failed"
+            message = f"{type(error).__name__}: {error}"[:2_000]
         with self.session_factory() as session:
             job = session.scalar(
                 select(WorkflowJobRecord)
@@ -437,11 +480,20 @@ class WorkflowEngine:
             run.version += 1
             run.updated_at = now
 
-            if job.attempt_count >= job.max_attempts:
+            if isinstance(error, PermanentWorkflowError) or job.attempt_count >= job.max_attempts:
                 job.status = "dead_lettered"
                 job.completed_at = now
                 run.status = "dead_lettered"
                 run.completed_at = now
+                self._sync_collaboration_failure(
+                    session,
+                    job,
+                    run,
+                    status="dead_lettered",
+                    error_code=error_code,
+                    message=message,
+                    now=now,
+                )
                 self._append_event(
                     session,
                     run,
@@ -450,16 +502,32 @@ class WorkflowEngine:
                     payload={
                         "attempt": job.attempt_count,
                         "error": message,
-                        "changed_resources": [],
+                        "changed_resources": self._changed_resources(job.step_type),
                     },
                 )
                 disposition = ExecutionDisposition.DEAD_LETTERED
             else:
                 delay = self.retry_base_seconds * (2 ** (job.attempt_count - 1))
+                retry_after = (
+                    error.retry_after_seconds
+                    if isinstance(error, WorkflowStepError)
+                    else None
+                )
+                if retry_after is not None:
+                    delay = max(delay, max(1, min(retry_after, 900)))
                 retry_at = now + timedelta(seconds=delay)
                 job.status = "retry_scheduled"
                 job.available_at = retry_at
                 run.status = "retry_scheduled"
+                self._sync_collaboration_failure(
+                    session,
+                    job,
+                    run,
+                    status="retry_scheduled",
+                    error_code=error_code,
+                    message=message,
+                    now=now,
+                )
                 self._queue_outbox(
                     session,
                     job,
@@ -475,7 +543,7 @@ class WorkflowEngine:
                         "attempt": job.attempt_count,
                         "retry_at": retry_at.isoformat(),
                         "error": message,
-                        "changed_resources": [],
+                        "changed_resources": self._changed_resources(job.step_type),
                     },
                 )
                 disposition = ExecutionDisposition.RETRY_SCHEDULED
@@ -622,7 +690,65 @@ class WorkflowEngine:
             "generate_proposal": ["incident", "proposal"],
             "execute_mitigation": ["incident", "proposal"],
             "generate_postmortem": ["incident", "postmortem"],
+            "deliver_collaboration_output": ["incident", "collaboration"],
         }.get(step_type, [])
+
+    @staticmethod
+    def _sync_collaboration_failure(
+        session: Session,
+        job: WorkflowJobRecord,
+        run: WorkflowRunRecord,
+        *,
+        status: str,
+        error_code: str,
+        message: str,
+        now: datetime,
+    ) -> None:
+        if job.step_type != "deliver_collaboration_output":
+            return
+        raw_output_id = job.payload.get("collaboration_output_id")
+        try:
+            output_id = UUID(str(raw_output_id))
+        except (TypeError, ValueError):
+            return
+        output = session.scalar(
+            select(CollaborationOutputRecord)
+            .where(
+                CollaborationOutputRecord.id == output_id,
+                CollaborationOutputRecord.incident_id == run.incident_id,
+            )
+            .options(selectinload(CollaborationOutputRecord.delivery))
+            .with_for_update()
+        )
+        if output is None or output.status == "delivered":
+            return
+        output.status = status
+        output.failure_reason = message[:500]
+        output.version += 1
+        if output.delivery is not None:
+            output.delivery.status = status
+            output.delivery.last_error_code = error_code[:64]
+            output.delivery.updated_at = now
+        session.add(
+            IncidentEventRecord(
+                incident_id=run.incident_id,
+                event_type=f"collaboration.delivery_{status}",
+                actor="pageragent-workflow-engine",
+                from_status=None,
+                to_status=run.incident.status,
+                note=(
+                    "Collaboration delivery exhausted its durable retry policy."
+                    if status == "dead_lettered"
+                    else "Collaboration delivery will retry through the durable outbox."
+                ),
+                payload={
+                    "output_id": str(output.id),
+                    "provider": output.provider,
+                    "error_code": error_code[:64],
+                    "attempt": job.attempt_count,
+                },
+            )
+        )
 
     @staticmethod
     def _future(value: datetime, now: datetime) -> bool:

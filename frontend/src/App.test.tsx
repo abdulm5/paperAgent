@@ -21,6 +21,8 @@ const allPermissions: AuthSession["permissions"] = [
   "investigations.run",
   "proposals.generate",
   "mitigations.decide",
+  "collaboration.prepare",
+  "collaboration.decide",
   "postmortems.generate",
   "postmortems.edit",
   "postmortems.finalize",
@@ -615,6 +617,7 @@ beforeEach(() => {
       if (path.endsWith("/workflows")) return jsonResponse([workflowRun]);
       if (path.endsWith("/investigations/latest")) return jsonResponse(investigation);
       if (path.endsWith("/proposals/latest")) return jsonResponse(proposal);
+      if (path.endsWith("/collaboration-outputs")) return jsonResponse([]);
       if (path.endsWith("/investigations") && init?.method === "POST") {
         return jsonResponse(investigation);
       }
@@ -805,6 +808,33 @@ test("applies only newer workflow stream updates and closes the flight recorder 
 
   unmount();
   expect(stream.close).toHaveBeenCalledOnce();
+});
+
+test("refreshes collaboration receipts from the durable workflow stream", async () => {
+  vi.stubGlobal("EventSource", MockEventSource);
+  render(<App />);
+
+  await screen.findByRole("heading", { name: "Publish without losing the evidence trail." });
+  const stream = MockEventSource.instances[0];
+  const collaborationReads = () => vi.mocked(fetch).mock.calls.filter(([input, init]) => (
+    String(input).endsWith("/collaboration-outputs") && (init?.method ?? "GET") === "GET"
+  )).length;
+  expect(collaborationReads()).toBe(1);
+
+  act(() => {
+    stream.emitWorkflow({
+      id: 12,
+      workflow_id: workflowRun.id,
+      incident_id: summary.id,
+      sequence: 12,
+      event_type: "workflow.step_completed",
+      payload: { changed_resources: ["collaboration"] },
+      created_at: workflowRun.updated_at,
+      workflow: { ...workflowRun, version: 3 },
+    });
+  });
+
+  await waitFor(() => expect(collaborationReads()).toBe(2));
 });
 
 test("records an operator lifecycle transition", async () => {

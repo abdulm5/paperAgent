@@ -13,7 +13,12 @@ from app.connectors.contracts import (
     validate_credentials,
 )
 from app.connectors.github import GitHubAppEvidenceProvider, GitHubProviderError
+from app.connectors.github_issues import (
+    GitHubIssuePublisher,
+    GitHubIssuePublisherError,
+)
 from app.connectors.prometheus import PrometheusHttpApiProvider, PrometheusProviderError
+from app.connectors.slack import SlackIncidentPublisher, SlackProviderError
 from app.connectors.vault import (
     CredentialCipher,
     CredentialContext,
@@ -39,6 +44,8 @@ from app.domain.connectors import (
     GithubCredentials,
     PrometheusConfiguration,
     PrometheusCredentials,
+    SlackConfiguration,
+    SlackCredentials,
 )
 from app.services.github_evidence import build_github_evidence_provider
 from app.services.prometheus_evidence import build_prometheus_evidence_provider
@@ -48,6 +55,12 @@ GithubProviderFactory = Callable[
 ]
 PrometheusProviderFactory = Callable[
     [PrometheusConfiguration, PrometheusCredentials], PrometheusHttpApiProvider
+]
+GitHubIssuePublisherFactory = Callable[
+    [GithubConfiguration, GithubCredentials], GitHubIssuePublisher
+]
+SlackPublisherFactory = Callable[
+    [SlackConfiguration, SlackCredentials], SlackIncidentPublisher
 ]
 
 
@@ -67,6 +80,24 @@ def build_prometheus_provider(
     """Build the metrics adapter only at the decrypted credential boundary."""
 
     return build_prometheus_evidence_provider(configuration, credentials)
+
+
+def build_github_issue_publisher(
+    configuration: GithubConfiguration,
+    credentials: GithubCredentials,
+) -> GitHubIssuePublisher:
+    """Build the issue publisher only at the final decrypted credential boundary."""
+
+    return GitHubIssuePublisher(configuration, credentials)
+
+
+def build_slack_publisher(
+    configuration: SlackConfiguration,
+    credentials: SlackCredentials,
+) -> SlackIncidentPublisher:
+    """Build the Slack publisher only at the final decrypted credential boundary."""
+
+    return SlackIncidentPublisher(configuration, credentials)
 
 
 class ConnectorNotFoundError(Exception):
@@ -121,6 +152,8 @@ class ConnectorService:
         cipher: CredentialCipher | None = None,
         github_provider_factory: GithubProviderFactory | None = None,
         prometheus_provider_factory: PrometheusProviderFactory | None = None,
+        github_issue_publisher_factory: GitHubIssuePublisherFactory | None = None,
+        slack_publisher_factory: SlackPublisherFactory | None = None,
     ) -> None:
         self.session = session
         self.organization_id = organization_id
@@ -129,6 +162,10 @@ class ConnectorService:
         self.prometheus_provider_factory = (
             prometheus_provider_factory or build_prometheus_provider
         )
+        self.github_issue_publisher_factory = (
+            github_issue_publisher_factory or build_github_issue_publisher
+        )
+        self.slack_publisher_factory = slack_publisher_factory or build_slack_publisher
 
     def list_connectors(self) -> list[ConnectorSummary]:
         records = self.session.scalars(
@@ -254,6 +291,8 @@ class ConnectorService:
                 self._assert_github_enablement(record)
             if request.enabled and record.provider == ConnectorProvider.PROMETHEUS.value:
                 self._assert_prometheus_enablement(record)
+            if request.enabled and record.provider == ConnectorProvider.SLACK.value:
+                self._assert_slack_enablement(record)
             record.enabled = request.enabled
             record.status = (
                 ConnectorStatus.CONFIGURED.value
@@ -369,6 +408,7 @@ class ConnectorService:
         self.session.rollback()
 
         provider_handshake: ConnectorProvider | None = None
+        github_issue_handshake = False
         if (
             valid
             and provider is ConnectorProvider.GITHUB
@@ -388,12 +428,50 @@ class ConnectorService:
                     close = getattr(github_provider, "close", None)
                     if callable(close):
                         close()
+                if github_configuration.issue_creation_enabled:
+                    github_issue_publisher = self.github_issue_publisher_factory(
+                        github_configuration,
+                        github_credentials,
+                    )
+                    try:
+                        github_issue_publisher.validate()
+                    finally:
+                        close = getattr(github_issue_publisher, "close", None)
+                        if callable(close):
+                            close()
+                    github_issue_handshake = True
                 provider_handshake = ConnectorProvider.GITHUB
-            except GitHubProviderError:
+            except (GitHubProviderError, GitHubIssuePublisherError):
                 valid = False
             except Exception:
                 # Private-key parser and injected transport details are never
                 # reflected through connector receipts or audit payloads.
+                valid = False
+        elif (
+            valid
+            and provider is ConnectorProvider.SLACK
+            and configuration is not None
+            and credentials is not None
+        ):
+            try:
+                slack_configuration = SlackConfiguration.model_validate(configuration)
+                slack_credentials = SlackCredentials.model_validate(credentials)
+                slack_publisher = self.slack_publisher_factory(
+                    slack_configuration,
+                    slack_credentials,
+                )
+                try:
+                    slack_publisher.validate()
+                finally:
+                    close = getattr(slack_publisher, "close", None)
+                    if callable(close):
+                        close()
+                provider_handshake = ConnectorProvider.SLACK
+            except SlackProviderError:
+                valid = False
+            except Exception:
+                # Tokens, response bodies, and transport details never enter
+                # validation receipts or the append-only custody history.
                 valid = False
         elif (
             valid
@@ -435,13 +513,24 @@ class ConnectorService:
 
         if valid:
             if provider_handshake is ConnectorProvider.GITHUB:
-                message = (
-                    "GitHub App installation and repository read handshake passed; "
-                    "the connector may now be enabled."
-                )
+                if github_issue_handshake:
+                    message = (
+                        "GitHub App repository-read and issue-write handshakes passed; "
+                        "the connector may now be enabled."
+                    )
+                else:
+                    message = (
+                        "GitHub App installation and repository read handshake passed; "
+                        "the connector may now be enabled."
+                    )
             elif provider_handshake is ConnectorProvider.PROMETHEUS:
                 message = (
                     "Prometheus read-only query handshake passed; "
+                    "the connector may now be enabled."
+                )
+            elif provider_handshake is ConnectorProvider.SLACK:
+                message = (
+                    "Slack bot identity and bounded channel-read handshakes passed; "
                     "the connector may now be enabled."
                 )
             else:
@@ -455,7 +544,11 @@ class ConnectorService:
                 else ConnectorStatus.DISABLED.value
             )
         else:
-            if provider in {ConnectorProvider.GITHUB, ConnectorProvider.PROMETHEUS}:
+            if provider in {
+                ConnectorProvider.GITHUB,
+                ConnectorProvider.PROMETHEUS,
+                ConnectorProvider.SLACK,
+            }:
                 message = (
                     f"{provider.value.title()} provider handshake or credential validation "
                     "failed; the connector remains disabled."
@@ -534,6 +627,21 @@ class ConnectorService:
         self._assert_unique_service_binding(
             record,
             ConnectorProvider.PROMETHEUS,
+            str(configuration["service"]),
+        )
+
+    def _assert_slack_enablement(self, record: ConnectorRecord) -> None:
+        configuration = validate_configuration(
+            ConnectorProvider.SLACK,
+            record.configuration,
+        )
+        if set(record.credential.credential_field_names) != {"bot_token"}:
+            raise ConnectorEnablementError(
+                "Slack credentials must match the Phase 9D contract and revalidate"
+            )
+        self._assert_unique_service_binding(
+            record,
+            ConnectorProvider.SLACK,
             str(configuration["service"]),
         )
 

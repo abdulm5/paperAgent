@@ -20,17 +20,23 @@ from app.connectors.github_issues import (
 from app.connectors.prometheus import PrometheusHttpApiProvider, PrometheusProviderError
 from app.connectors.slack import SlackIncidentPublisher, SlackProviderError
 from app.connectors.vault import (
+    AWS_KMS_CIPHER_SCHEME,
+    LOCAL_CIPHER_SCHEME,
     CredentialCipher,
     CredentialContext,
+    CredentialCustodyUnavailableError,
     CredentialVaultError,
     SealedCredentials,
     build_credential_cipher,
 )
+from app.core.config import settings
 from app.db.models import (
     ConnectorAuditEventRecord,
     ConnectorCredentialRecord,
     ConnectorRecord,
+    OrganizationMembershipRecord,
     OrganizationRecord,
+    UserRecord,
 )
 from app.domain.connectors import (
     ConnectorAuditEvent,
@@ -118,6 +124,14 @@ class ConnectorEnablementError(Exception):
     pass
 
 
+class ConnectorCustodyUnavailableError(Exception):
+    """The external credential-custody boundary could not complete safely."""
+
+
+class ConnectorAuthorityChangedError(PermissionError):
+    """The actor lost connector administration authority during external I/O."""
+
+
 class ConnectorAuditIntegrityError(Exception):
     pass
 
@@ -154,10 +168,12 @@ class ConnectorService:
         prometheus_provider_factory: PrometheusProviderFactory | None = None,
         github_issue_publisher_factory: GitHubIssuePublisherFactory | None = None,
         slack_publisher_factory: SlackPublisherFactory | None = None,
+        required_cipher_scheme: str | None = None,
+        required_key_version: str | None = None,
     ) -> None:
         self.session = session
         self.organization_id = organization_id
-        self.cipher = cipher or build_credential_cipher()
+        self._cipher = cipher
         self.github_provider_factory = github_provider_factory or build_github_provider
         self.prometheus_provider_factory = (
             prometheus_provider_factory or build_prometheus_provider
@@ -166,6 +182,28 @@ class ConnectorService:
             github_issue_publisher_factory or build_github_issue_publisher
         )
         self.slack_publisher_factory = slack_publisher_factory or build_slack_publisher
+        self.required_cipher_scheme = required_cipher_scheme or (
+            AWS_KMS_CIPHER_SCHEME
+            if settings.connector_cipher_provider == "aws_kms"
+            else LOCAL_CIPHER_SCHEME
+        )
+        self.required_key_version = (
+            required_key_version
+            if required_key_version is not None
+            else (
+                settings.connector_kms_key_arn
+                if self.required_cipher_scheme == AWS_KMS_CIPHER_SCHEME
+                else None
+            )
+        )
+
+    @property
+    def cipher(self) -> CredentialCipher:
+        # Constructing an AWS SDK client can resolve workload credentials. Keep
+        # that boundary out of metadata-only list/get/patch requests.
+        if self._cipher is None:
+            self._cipher = build_credential_cipher()
+        return self._cipher
 
     def list_connectors(self) -> list[ConnectorSummary]:
         records = self.session.scalars(
@@ -199,6 +237,7 @@ class ConnectorService:
         request: ConnectorCreateInput,
         *,
         actor: str,
+        actor_user_id: UUID | None = None,
     ) -> ConnectorSummary:
         if not request.name.strip():
             raise ConnectorContractError("Connector name must not be empty")
@@ -206,6 +245,11 @@ class ConnectorService:
         credentials = validate_credentials(request.provider, request.credentials)
         connector_id = uuid4()
         credential_version = 1
+        # Authentication and permission dependencies use this same request
+        # session. End their read transaction before lazy AWS credential
+        # resolution or GenerateDataKey, then serialize with any concurrent
+        # membership administration before committing the connector.
+        self.session.rollback()
         try:
             sealed = self.cipher.seal(
                 credentials,
@@ -217,6 +261,12 @@ class ConnectorService:
             )
         except ValueError as error:
             raise ConnectorContractError("Connector credentials exceed custody limits") from error
+        except CredentialVaultError as error:
+            raise ConnectorCustodyUnavailableError(
+                "Connector credential custody is temporarily unavailable"
+            ) from error
+        if actor_user_id is not None:
+            self._lock_and_require_admin(actor_user_id)
         record = ConnectorRecord(
             id=connector_id,
             organization_id=self.organization_id,
@@ -287,6 +337,20 @@ class ConnectorService:
                 raise ConnectorEnablementError(
                     "A connector must pass its current validation before it can be enabled"
                 )
+            if (
+                request.enabled
+                and (
+                    record.credential.cipher_scheme != self.required_cipher_scheme
+                    or (
+                        self.required_cipher_scheme == AWS_KMS_CIPHER_SCHEME
+                        and record.credential.key_version != self.required_key_version
+                    )
+                )
+            ):
+                raise ConnectorEnablementError(
+                    "Connector credentials must be rotated and revalidated under the "
+                    "active custody provider"
+                )
             if request.enabled and record.provider == ConnectorProvider.GITHUB.value:
                 self._assert_github_enablement(record)
             if request.enabled and record.provider == ConnectorProvider.PROMETHEUS.value:
@@ -325,13 +389,20 @@ class ConnectorService:
         request: ConnectorCredentialsInput,
         *,
         actor: str,
+        actor_user_id: UUID | None = None,
     ) -> ConnectorSummary:
-        record = self._get_record(connector_id, for_update=True)
+        # Snapshot the current version, then release the read transaction before
+        # a production cipher can call AWS KMS. The locked reload below is the
+        # compare-and-swap that prevents a slow envelope result from overwriting
+        # a concurrent connector or credential change.
+        record = self._get_record(connector_id)
         self._check_version(record, request.expected_version)
         provider = ConnectorProvider(record.provider)
         credentials = validate_credentials(provider, request.credentials)
+        snapshot_version = record.version
         current_credential_version = record.credential.credential_version
         credential_version = current_credential_version + 1
+        self.session.rollback()
         try:
             sealed = self.cipher.seal(
                 credentials,
@@ -339,6 +410,21 @@ class ConnectorService:
             )
         except ValueError as error:
             raise ConnectorContractError("Connector credentials exceed custody limits") from error
+        except CredentialVaultError as error:
+            raise ConnectorCustodyUnavailableError(
+                "Connector credential custody is temporarily unavailable"
+            ) from error
+
+        if actor_user_id is not None:
+            self._lock_and_require_admin(actor_user_id)
+        record = self._get_record(connector_id, for_update=True)
+        if (
+            record.version != snapshot_version
+            or record.credential.credential_version != current_credential_version
+        ):
+            current_version = record.version
+            self.session.rollback()
+            raise ConnectorVersionConflictError(current_version)
         credential = record.credential
         credential.credential_version = credential_version
         credential.ciphertext = sealed.ciphertext
@@ -346,6 +432,7 @@ class ConnectorService:
         credential.wrapped_data_key = sealed.wrapped_data_key
         credential.wrapped_key_nonce = sealed.wrapped_key_nonce
         credential.key_version = sealed.key_version
+        credential.cipher_scheme = sealed.cipher_scheme
         credential.credential_field_names = list(sealed.credential_field_names)
         credential.updated_at = datetime.now(UTC)
 
@@ -376,6 +463,7 @@ class ConnectorService:
         expected_version: int,
         *,
         actor: str,
+        actor_user_id: UUID | None = None,
     ) -> ConnectorSummary:
         # Provider handshakes deliberately run outside a database transaction. A
         # version/credential compare-and-swap below prevents a slow result from
@@ -385,27 +473,34 @@ class ConnectorService:
         provider = ConnectorProvider(record.provider)
         snapshot_version = record.version
         snapshot_credential_version = record.credential.credential_version
+        configuration_snapshot = dict(record.configuration)
+        sealed = self._sealed_credentials(record.credential)
+        credential_context = self._credential_context(
+            connector_id,
+            provider,
+            snapshot_credential_version,
+        )
+
+        # End the read transaction before AWS KMS decryption and every provider
+        # handshake. No ORM object is used again until the locked reload.
+        self.session.rollback()
+
         configuration: dict[str, Any] | None = None
         credentials: dict[str, str] | None = None
         valid = True
         try:
-            configuration = validate_configuration(provider, record.configuration)
-            sealed = self._sealed_credentials(record.credential)
+            configuration = validate_configuration(provider, configuration_snapshot)
             credentials = self.cipher.open(
                 sealed,
-                self._credential_context(
-                    connector_id,
-                    provider,
-                    record.credential.credential_version,
-                ),
+                credential_context,
             )
             credentials = validate_credentials(provider, credentials)
+        except CredentialCustodyUnavailableError as error:
+            raise ConnectorCustodyUnavailableError(
+                "Connector credential custody is temporarily unavailable"
+            ) from error
         except (ConnectorContractError, CredentialVaultError):
             valid = False
-
-        # End the read transaction before any external I/O. Snapshot values are
-        # plain copies and no ORM object is used again until the locked reload.
-        self.session.rollback()
 
         provider_handshake: ConnectorProvider | None = None
         github_issue_handshake = False
@@ -502,6 +597,8 @@ class ConnectorService:
                 # validation receipt and append-only connector audit stream.
                 valid = False
 
+        if actor_user_id is not None:
+            self._lock_and_require_admin(actor_user_id)
         record = self._get_record(connector_id, for_update=True)
         if (
             record.version != snapshot_version
@@ -591,6 +688,32 @@ class ConnectorService:
         if record is None or record.credential is None:
             raise ConnectorNotFoundError
         return record
+
+    def _lock_and_require_admin(self, actor_user_id: UUID) -> None:
+        organization = self.session.scalar(
+            select(OrganizationRecord.id)
+            .where(OrganizationRecord.id == self.organization_id)
+            .with_for_update()
+        )
+        if organization is None:
+            raise ConnectorNotFoundError
+        membership = self.session.scalar(
+            select(OrganizationMembershipRecord)
+            .join(UserRecord, UserRecord.id == OrganizationMembershipRecord.user_id)
+            .where(
+                OrganizationMembershipRecord.organization_id == self.organization_id,
+                OrganizationMembershipRecord.user_id == actor_user_id,
+                OrganizationMembershipRecord.role == "admin",
+                OrganizationMembershipRecord.is_active.is_(True),
+                UserRecord.is_active.is_(True),
+            )
+            .with_for_update()
+        )
+        if membership is None:
+            self.session.rollback()
+            raise ConnectorAuthorityChangedError(
+                "Connector administration authority changed during provider work"
+            )
 
     @staticmethod
     def _check_version(record: ConnectorRecord, expected_version: int) -> None:
@@ -703,6 +826,7 @@ class ConnectorService:
             wrapped_data_key=sealed.wrapped_data_key,
             wrapped_key_nonce=sealed.wrapped_key_nonce,
             key_version=sealed.key_version,
+            cipher_scheme=sealed.cipher_scheme,
             credential_field_names=list(sealed.credential_field_names),
         )
 
@@ -714,6 +838,7 @@ class ConnectorService:
             wrapped_data_key=credential.wrapped_data_key,
             wrapped_key_nonce=credential.wrapped_key_nonce,
             key_version=credential.key_version,
+            cipher_scheme=credential.cipher_scheme,
             credential_field_names=tuple(credential.credential_field_names),
         )
 

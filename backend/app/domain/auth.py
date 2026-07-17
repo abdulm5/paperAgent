@@ -28,6 +28,8 @@ class Permission(StrEnum):
     CONNECTORS_VALIDATE = "connectors.validate"
     COLLABORATION_PREPARE = "collaboration.prepare"
     COLLABORATION_DECIDE = "collaboration.decide"
+    MEMBERSHIPS_READ = "memberships.read"
+    MEMBERSHIPS_MANAGE = "memberships.manage"
 
 
 class Principal(BaseModel):

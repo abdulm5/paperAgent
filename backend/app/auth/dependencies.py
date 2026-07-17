@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from hmac import compare_digest
 
 from fastapi import Depends, HTTPException, Request, status
@@ -10,7 +11,7 @@ from app.auth.constants import CSRF_HEADER_NAME
 from app.auth.service import AuthService, PrincipalNotFoundError
 from app.auth.tokens import InvalidSessionTokenError, SessionTokenClaims, decode_session_token
 from app.core.config import settings
-from app.db.models import OrganizationRecord
+from app.db.models import AuthSessionRecord, OrganizationRecord
 from app.db.session import get_db
 from app.domain.auth import IngestContext, Permission, Principal
 
@@ -32,6 +33,13 @@ def _unauthorized(detail: str = "Authentication required") -> HTTPException:
     )
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Normalize SQLite's timezone-naive values and production timestamptz values."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def get_authenticated_request(
     request: Request,
     session: Session = Depends(get_db),
@@ -51,6 +59,21 @@ def get_authenticated_request(
         claims = decode_session_token(token)
     except InvalidSessionTokenError as error:
         raise _unauthorized("Invalid or expired session") from error
+
+    now = datetime.now(UTC)
+    session_record = session.scalar(
+        select(AuthSessionRecord).where(
+            AuthSessionRecord.id == claims.session_id,
+            AuthSessionRecord.user_id == claims.user_id,
+            AuthSessionRecord.organization_id == claims.organization_id,
+        )
+    )
+    if (
+        session_record is None
+        or session_record.revoked_at is not None
+        or _as_utc(session_record.expires_at) <= now
+    ):
+        raise _unauthorized("Invalid or expired session")
     try:
         principal = AuthService(session).load_principal(
             claims.user_id,

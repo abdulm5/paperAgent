@@ -70,11 +70,26 @@ class UserRecord(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    sessions: Mapped[list["AuthSessionRecord"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class OrganizationMembershipRecord(Base):
     __tablename__ = "organization_memberships"
-    __table_args__ = (Index("ix_organization_memberships_user", "user_id"),)
+    __table_args__ = (
+        Index("ix_organization_memberships_user", "user_id"),
+        CheckConstraint(
+            "role IN ('viewer', 'responder', 'incident_commander', 'admin')",
+            name="ck_organization_memberships_role",
+        ),
+        CheckConstraint(
+            "version > 0",
+            name="ck_organization_memberships_version_positive",
+        ),
+    )
 
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("organizations.id", ondelete="CASCADE"), primary_key=True
@@ -84,12 +99,141 @@ class OrganizationMembershipRecord(Base):
     )
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     is_active: Mapped[bool] = mapped_column(nullable=False, default=True)
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
     organization: Mapped[OrganizationRecord] = relationship(back_populates="memberships")
     user: Mapped[UserRecord] = relationship(back_populates="memberships")
+
+
+class AuthSessionRecord(Base):
+    __tablename__ = "auth_sessions"
+    __table_args__ = (
+        Index("ix_auth_sessions_user_expires", "user_id", "expires_at"),
+        Index("ix_auth_sessions_active_expires", "revoked_at", "expires_at"),
+        Index("ix_auth_sessions_expires", "expires_at"),
+        ForeignKeyConstraint(
+            ["organization_id", "user_id"],
+            [
+                "organization_memberships.organization_id",
+                "organization_memberships.user_id",
+            ],
+            name="fk_auth_sessions_membership",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "auth_method IN ('local', 'oidc')",
+            name="ck_auth_sessions_method",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    auth_method: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    user: Mapped[UserRecord] = relationship(back_populates="sessions")
+
+
+class OidcLoginTransactionRecord(Base):
+    __tablename__ = "oidc_login_transactions"
+    __table_args__ = (
+        Index("ix_oidc_login_transactions_expires", "expires_at"),
+        Index(
+            "ix_oidc_login_transactions_org_pending",
+            "organization_slug",
+            "consumed_at",
+            "expires_at",
+        ),
+        CheckConstraint(
+            "length(state_hash) = 64 AND length(browser_binding_hash) = 64 "
+            "AND length(nonce_hash) = 64",
+            name="ck_oidc_login_transactions_hash_lengths",
+        ),
+        CheckConstraint(
+            "length(verifier_nonce) = 12",
+            name="ck_oidc_login_transactions_nonce_length",
+        ),
+        CheckConstraint(
+            "length(verifier_ciphertext) BETWEEN 59 AND 272",
+            name="ck_oidc_login_transactions_ciphertext_length",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    browser_binding_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    nonce_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    verifier_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    verifier_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    organization_slug: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class IdentityAuditEventRecord(Base):
+    __tablename__ = "identity_audit_events"
+    __table_args__ = (
+        Index(
+            "ix_identity_audit_events_organization_created",
+            "organization_id",
+            "created_at",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "target_user_id",
+            "membership_version",
+            name="uq_identity_audit_events_membership_version",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "target_user_id"],
+            [
+                "organization_memberships.organization_id",
+                "organization_memberships.user_id",
+            ],
+            name="fk_identity_audit_events_membership",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "event_type IN ('membership.provisioned', 'membership.updated')",
+            name="ck_identity_audit_events_type",
+        ),
+        CheckConstraint(
+            "membership_version > 0",
+            name="ck_identity_audit_events_version_positive",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    target_user_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor: Mapped[str] = mapped_column(String(100), nullable=False)
+    membership_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(json_document, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class ConnectorRecord(Base):
@@ -158,16 +302,23 @@ class ConnectorCredentialRecord(Base):
             name="ck_connector_credentials_ciphertext_nonce_length",
         ),
         CheckConstraint(
-            "length(wrapped_key_nonce) = 12",
-            name="ck_connector_credentials_wrapped_key_nonce_length",
-        ),
-        CheckConstraint(
             "length(ciphertext) >= 16",
             name="ck_connector_credentials_ciphertext_length",
         ),
         CheckConstraint(
-            "length(wrapped_data_key) = 48",
-            name="ck_connector_credentials_wrapped_key_length",
+            "cipher_scheme IN ('local-aesgcm-v1', 'aws-kms-v1')",
+            name="ck_connector_credentials_cipher_scheme",
+        ),
+        CheckConstraint(
+            "(cipher_scheme = 'local-aesgcm-v1' "
+            "AND length(wrapped_key_nonce) = 12 "
+            "AND length(wrapped_data_key) = 48 "
+            "AND length(key_version) BETWEEN 1 AND 100) OR "
+            "(cipher_scheme = 'aws-kms-v1' "
+            "AND wrapped_key_nonce IS NULL "
+            "AND length(wrapped_data_key) BETWEEN 1 AND 6144 "
+            "AND length(key_version) BETWEEN 20 AND 2048)",
+            name="ck_connector_credentials_wrap_contract",
         ),
         CheckConstraint(
             "length(ciphertext) <= 262144",
@@ -182,8 +333,14 @@ class ConnectorCredentialRecord(Base):
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     ciphertext_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     wrapped_data_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    wrapped_key_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    key_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    wrapped_key_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
+    key_version: Mapped[str] = mapped_column(String(2048), nullable=False)
+    cipher_scheme: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="local-aesgcm-v1",
+        server_default="local-aesgcm-v1",
+    )
     credential_field_names: Mapped[list[str]] = mapped_column(json_document, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

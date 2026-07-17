@@ -205,8 +205,9 @@ def test_production_configuration_rejects_development_identity_defaults() -> Non
     assert "PAGERAGENT_SESSION_SECRET" in message
     assert "PAGERAGENT_INGEST_API_KEY" in message
     assert "PAGERAGENT_OIDC_ISSUER" in message
-    assert "PAGERAGENT_CONNECTOR_MASTER_KEY" in message
-    assert "PAGERAGENT_CONNECTOR_KEY_VERSION" in message
+    assert "PAGERAGENT_CONNECTOR_CIPHER_PROVIDER" in message
+    assert "PAGERAGENT_OIDC_CLIENT_ID" in message
+    assert "PAGERAGENT_OIDC_TRANSACTION_KEY" in message
     assert "GITHUB_EVIDENCE_MODE" in message
     assert "PROMETHEUS_EVIDENCE_MODE" in message
 
@@ -257,12 +258,32 @@ def test_production_configuration_accepts_complete_fail_closed_identity_settings
         PAGERAGENT_AUTH_MODE="oidc",
         PAGERAGENT_SESSION_SECRET="session-secret-with-at-least-thirty-two-characters",
         PAGERAGENT_SESSION_COOKIE_SECURE=True,
+        PAGERAGENT_SESSION_COOKIE_NAME="__Host-pageragent_session",
         PAGERAGENT_OIDC_ISSUER="https://identity.example.com",
         PAGERAGENT_OIDC_AUDIENCE="pageragent-api",
         PAGERAGENT_OIDC_JWKS_URL="https://identity.example.com/.well-known/jwks.json",
+        PAGERAGENT_OIDC_CLIENT_ID="pageragent-api",
+        PAGERAGENT_OIDC_CLIENT_SECRET=(
+            "oidc-client-secret-with-at-least-thirty-two-characters"
+        ),
+        PAGERAGENT_OIDC_AUTHORIZATION_URL="https://identity.example.com/oauth2/authorize",
+        PAGERAGENT_OIDC_TOKEN_URL="https://identity.example.com/oauth2/token",
+        PAGERAGENT_OIDC_REDIRECT_URI=(
+            "https://pageragent.example.com/api/v1/auth/oidc/callback"
+        ),
+        PAGERAGENT_OIDC_FRONTEND_URL="https://pageragent.example.com/",
+        PAGERAGENT_OIDC_DEFAULT_ORGANIZATION_SLUG="pageragent-labs",
+        PAGERAGENT_OIDC_LOGIN_COOKIE_NAME="__Host-pageragent_oidc_login",
+        PAGERAGENT_OIDC_TRANSACTION_KEY=(
+            "ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA="
+        ),
         PAGERAGENT_INGEST_API_KEY="ingest-key-with-at-least-thirty-two-characters",
-        PAGERAGENT_CONNECTOR_MASTER_KEY="eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=",
-        PAGERAGENT_CONNECTOR_KEY_VERSION="production-v1",
+        PAGERAGENT_CONNECTOR_CIPHER_PROVIDER="aws_kms",
+        PAGERAGENT_CONNECTOR_KMS_KEY_ARN=(
+            "arn:aws:kms:us-east-1:123456789012:"
+            "key/12345678-1234-1234-1234-123456789012"
+        ),
+        PAGERAGENT_CONNECTOR_KMS_REGION="us-east-1",
         PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS="https://api.github.com",
         GITHUB_EVIDENCE_MODE="connector",
         PROMETHEUS_EVIDENCE_MODE="connector",
@@ -271,3 +292,79 @@ def test_production_configuration_accepts_complete_fail_closed_identity_settings
     )
 
     assert config.auth_mode == "oidc"
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        (
+            {"PAGERAGENT_SESSION_COOKIE_NAME": "pageragent_session"},
+            "PAGERAGENT_SESSION_COOKIE_NAME",
+        ),
+        (
+            {"PAGERAGENT_OIDC_LOGIN_COOKIE_NAME": "pageragent_oidc_login"},
+            "PAGERAGENT_OIDC_LOGIN_COOKIE_NAME",
+        ),
+        (
+            {
+                "PAGERAGENT_OIDC_REDIRECT_URI": (
+                    "https://pageragent.example.com/unregistered/callback"
+                )
+            },
+            "PAGERAGENT_OIDC_REDIRECT_URI",
+        ),
+        (
+            {
+                "PAGERAGENT_OIDC_FRONTEND_URL": (
+                    "https://console.pageragent.example.com/"
+                )
+            },
+            "share one browser origin",
+        ),
+    ],
+)
+def test_production_configuration_rejects_cookie_tossing_and_callback_drift(
+    override: dict[str, str],
+    message: str,
+) -> None:
+    production = {
+        "PAGERAGENT_ENV": "production",
+        "PAGERAGENT_AUTH_MODE": "oidc",
+        "PAGERAGENT_SESSION_SECRET": (
+            "session-secret-with-at-least-thirty-two-characters"
+        ),
+        "PAGERAGENT_SESSION_COOKIE_SECURE": True,
+        "PAGERAGENT_SESSION_COOKIE_NAME": "__Host-pageragent_session",
+        "PAGERAGENT_OIDC_ISSUER": "https://identity.example.com",
+        "PAGERAGENT_OIDC_AUDIENCE": "pageragent-api",
+        "PAGERAGENT_OIDC_JWKS_URL": "https://identity.example.com/jwks",
+        "PAGERAGENT_OIDC_CLIENT_ID": "pageragent-api",
+        "PAGERAGENT_OIDC_CLIENT_SECRET": "client-secret-with-32-characters-minimum",
+        "PAGERAGENT_OIDC_AUTHORIZATION_URL": "https://identity.example.com/authorize",
+        "PAGERAGENT_OIDC_TOKEN_URL": "https://identity.example.com/token",
+        "PAGERAGENT_OIDC_REDIRECT_URI": (
+            "https://pageragent.example.com/api/v1/auth/oidc/callback"
+        ),
+        "PAGERAGENT_OIDC_FRONTEND_URL": "https://pageragent.example.com/",
+        "PAGERAGENT_OIDC_DEFAULT_ORGANIZATION_SLUG": "pageragent-labs",
+        "PAGERAGENT_OIDC_TRANSACTION_KEY": (
+            "ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA="
+        ),
+        "PAGERAGENT_OIDC_LOGIN_COOKIE_NAME": "__Host-pageragent_oidc_login",
+        "PAGERAGENT_INGEST_API_KEY": "ingest-key-with-at-least-thirty-two-characters",
+        "PAGERAGENT_CONNECTOR_CIPHER_PROVIDER": "aws_kms",
+        "PAGERAGENT_CONNECTOR_KMS_KEY_ARN": (
+            "arn:aws:kms:us-east-1:123456789012:"
+            "key/12345678-1234-1234-1234-123456789012"
+        ),
+        "PAGERAGENT_CONNECTOR_KMS_REGION": "us-east-1",
+        "PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS": "https://api.github.com",
+        "GITHUB_EVIDENCE_MODE": "connector",
+        "PROMETHEUS_EVIDENCE_MODE": "connector",
+        "PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS": "https://telemetry.example.com",
+        "backend_cors_origins": "https://pageragent.example.com",
+    }
+    production.update(override)
+
+    with pytest.raises(ValidationError, match=message):
+        Settings(_env_file=None, **production)

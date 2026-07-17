@@ -41,6 +41,7 @@ def test_envelope_cipher_round_trips_with_random_data_key_and_independent_nonces
 
     assert first.ciphertext != second.ciphertext
     assert first.wrapped_data_key != second.wrapped_data_key
+    assert first.cipher_scheme == "local-aesgcm-v1"
     assert first.ciphertext_nonce != first.wrapped_key_nonce
     assert second.ciphertext_nonce != second.wrapped_key_nonce
     assert cipher.open(first, context()) == credentials
@@ -112,6 +113,32 @@ def test_cipher_defensively_rejects_invalid_or_oversized_plaintext(
 
     with pytest.raises(ValueError, match="custody|vault input bounds|Credential values"):
         cipher.seal(credentials, context())
+
+
+def test_cipher_serializes_unicode_without_expanding_past_database_bounds() -> None:
+    cipher = AesGcmEnvelopeCipher(active_key_version="v1", active_key=V1_KEY)
+    credentials = {
+        "private_key": "🔐" * 16_000,
+        "webhook_secret": "🚀" * 16_000,
+    }
+
+    sealed = cipher.seal(credentials, context())
+
+    assert len(sealed.ciphertext) <= 262_144
+    assert cipher.open(sealed, context()) == credentials
+
+
+def test_cipher_rejects_json_escaping_that_exceeds_ciphertext_database_bound() -> None:
+    cipher = AesGcmEnvelopeCipher(active_key_version="v1", active_key=V1_KEY)
+
+    with pytest.raises(ValueError, match="ciphertext bound"):
+        cipher.seal(
+            {
+                "private_key": "\x00" * 65_536,
+                "webhook_secret": "\x01" * 65_536,
+            },
+            context(),
+        )
 
 
 @pytest.mark.parametrize(

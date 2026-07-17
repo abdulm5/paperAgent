@@ -156,6 +156,7 @@ def test_workflow_event_stream_stops_when_the_signed_session_expires() -> None:
         stream = workflow_event_stream(
             ConnectedRequest(),  # type: ignore[arg-type]
             principal=_principal(Role.VIEWER),
+            session_id=uuid4(),
             session_expires_at=datetime.now(UTC) - timedelta(seconds=1),
             poll_seconds=0,
         )

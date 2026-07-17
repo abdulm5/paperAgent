@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.auth.constants import DEFAULT_ORGANIZATION_ID, DEFAULT_ORGANIZATION_SLUG
 from app.auth.dependencies import get_current_principal
 from app.auth.permissions import permissions_for_role
+from app.connectors.runtime import SlackConnectorCustodyUnavailableError
 from app.connectors.vault import build_credential_cipher
 from app.db.models import (
     CollaborationOutputRecord,
@@ -37,7 +38,7 @@ from app.services.collaboration import (
 )
 from app.services.connectors import ConnectorService
 from app.workflows.engine import ExecutionDisposition, WorkflowEngine
-from app.workflows.errors import PermanentWorkflowError
+from app.workflows.errors import PermanentWorkflowError, RetryableWorkflowError
 from tests.conftest import TEST_USER_ID
 from tests.test_proposals import RecordingExecutor, incident_with_investigation, proposal_service
 
@@ -495,6 +496,38 @@ def test_delivery_rejects_post_approval_packet_mutation_before_provider_io(
 
     assert captured.value.code == expected_code
     assert calls == []
+
+
+def test_delivery_retries_when_external_credential_custody_is_unavailable(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _create_enabled_slack_connector(db_session)
+    incident_id, proposal = _proposal_fixture(db_session)
+    service, output = _prepare_slack(db_session, incident_id, proposal)
+    approved = service.decide(
+        output.id,
+        CollaborationDecisionRequest(
+            decision="approve",
+            expected_version=output.version,
+            expected_content_sha256=output.content_sha256,
+            actor="user:incident-commander",
+        ),
+    )
+
+    def unavailable(*_args: object, **_kwargs: object) -> object:
+        raise SlackConnectorCustodyUnavailableError
+
+    monkeypatch.setattr(
+        "app.services.collaboration.load_slack_connector_runtime",
+        unavailable,
+    )
+
+    with pytest.raises(RetryableWorkflowError) as captured:
+        service.deliver(approved.id)
+
+    assert captured.value.code == "collaboration_connector_custody_unavailable"
+    assert "credential" not in str(captured.value.__cause__).lower()
 
 
 def test_retryable_ambiguous_provider_failure_uses_workflow_retry_and_receipt(

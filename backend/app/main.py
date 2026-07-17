@@ -5,10 +5,12 @@ from fastapi.responses import JSONResponse
 from opentelemetry.trace import SpanKind
 
 from app.api.router import api_router
+from app.core.access_logging import install_access_log_redaction
 from app.core.config import settings
 from app.core.telemetry import configure_telemetry, current_trace_id, tracer
 
 configure_telemetry()
+install_access_log_redaction()
 
 app = FastAPI(
     title="PagerAgent API",

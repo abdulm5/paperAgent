@@ -21,7 +21,10 @@ from app.api.routes.github_webhooks import (
 from app.auth.constants import DEFAULT_ORGANIZATION_ID, DEFAULT_ORGANIZATION_SLUG
 from app.auth.dependencies import get_current_principal
 from app.auth.permissions import permissions_for_role
-from app.connectors.runtime import load_github_connector_runtime
+from app.connectors.runtime import (
+    GithubConnectorCustodyUnavailableError,
+    load_github_connector_runtime,
+)
 from app.connectors.vault import CredentialContext, build_credential_cipher
 from app.db.models import (
     ConnectorCredentialRecord,
@@ -783,6 +786,28 @@ def test_unknown_disabled_invalid_legacy_and_credentialless_connectors_share_a_4
         assert response.status_code == 404
         expected = expected or response.json()
         assert response.json() == expected
+
+
+def test_transient_credential_custody_outage_returns_retryable_503(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(*_args: object, **_kwargs: object) -> object:
+        raise GithubConnectorCustodyUnavailableError
+
+    monkeypatch.setattr(
+        "app.api.routes.github_webhooks.load_github_connector_runtime",
+        unavailable,
+    )
+
+    response = post_webhook(uuid4(), push_payload())
+
+    assert db_session is not None
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "5"
+    assert response.json() == {
+        "detail": "GitHub webhook credential custody is temporarily unavailable"
+    }
 
 
 def test_tampered_credential_envelope_is_indistinguishable_from_unavailable(

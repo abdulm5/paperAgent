@@ -1,9 +1,9 @@
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from binascii import Error as BinasciiError
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from secrets import token_urlsafe
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import jwt
 from jwt import InvalidTokenError
@@ -22,6 +22,7 @@ class InvalidSessionTokenError(ValueError):
 
 @dataclass(frozen=True)
 class SessionTokenClaims:
+    session_id: UUID
     user_id: UUID
     organization_id: UUID
     csrf_token: str
@@ -32,6 +33,8 @@ class SessionTokenClaims:
 class IssuedSessionToken:
     encoded: str
     csrf_token: str
+    session_id: UUID
+    expires_at: datetime
 
 
 def is_canonical_jwt(encoded: str) -> bool:
@@ -55,9 +58,16 @@ def issue_session_token(
     user_id: UUID,
     organization_id: UUID,
     *,
+    session_id: UUID,
+    expires_at: datetime,
     config: Settings = settings,
 ) -> IssuedSessionToken:
-    now = datetime.now(UTC)
+    now = datetime.now(UTC).replace(microsecond=0)
+    if expires_at.tzinfo is None:
+        raise ValueError("Session expiration must include a timezone")
+    normalized_expiry = expires_at.astimezone(UTC).replace(microsecond=0)
+    if normalized_expiry <= now:
+        raise ValueError("Session expiration must be in the future")
     csrf_token = token_urlsafe(32)
     claims = {
         "iss": INTERNAL_TOKEN_ISSUER,
@@ -66,17 +76,22 @@ def issue_session_token(
         "org": str(organization_id),
         "csrf": csrf_token,
         "typ": INTERNAL_TOKEN_TYPE,
-        "jti": str(uuid4()),
+        "jti": str(session_id),
         "iat": now,
         "nbf": now,
-        "exp": now + timedelta(seconds=config.session_ttl_seconds),
+        "exp": normalized_expiry,
     }
     encoded = jwt.encode(
         claims,
         config.session_secret.get_secret_value(),
         algorithm="HS256",
     )
-    return IssuedSessionToken(encoded=encoded, csrf_token=csrf_token)
+    return IssuedSessionToken(
+        encoded=encoded,
+        csrf_token=csrf_token,
+        session_id=session_id,
+        expires_at=normalized_expiry,
+    )
 
 
 def decode_session_token(
@@ -113,8 +128,9 @@ def decode_session_token(
         csrf_token = claims["csrf"]
         if not isinstance(csrf_token, str) or len(csrf_token) < 32:
             raise InvalidSessionTokenError("Invalid CSRF claim")
-        UUID(claims["jti"])
+        session_id = UUID(claims["jti"])
         return SessionTokenClaims(
+            session_id=session_id,
             user_id=UUID(claims["sub"]),
             organization_id=UUID(claims["org"]),
             csrf_token=csrf_token,

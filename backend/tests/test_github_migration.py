@@ -79,11 +79,11 @@ def test_empty_github_evidence_migration_round_trips_on_sqlite(tmp_path: Path) -
     try:
         settings.database_url = database_url
         config = migration_config()
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260716_0010")
         engine = create_engine(database_url)
         signature = github_schema_signature(engine)
 
-        assert signature["revision"] == "20260717_0011"
+        assert signature["revision"] == "20260716_0010"
         assert "github_webhook_deliveries" in signature["tables"]
         assert signature["columns"] == (
             "id",
@@ -128,8 +128,8 @@ def test_empty_github_evidence_migration_round_trips_on_sqlite(tmp_path: Path) -
                 == "20260715_0008"
             )
 
-        command.upgrade(config, "head")
-        assert github_schema_signature(engine)["revision"] == "20260717_0011"
+        command.upgrade(config, "20260716_0010")
+        assert github_schema_signature(engine)["revision"] == "20260716_0010"
     finally:
         settings.database_url = previous_url
         if engine is not None:

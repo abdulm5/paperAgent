@@ -495,7 +495,55 @@ export type Permission =
   | "organization.reset"
   | "connectors.read"
   | "connectors.manage"
-  | "connectors.validate";
+  | "connectors.validate"
+  | "memberships.read"
+  | "memberships.manage";
+
+export type MembershipRole = "viewer" | "responder" | "incident_commander" | "admin";
+
+export interface MembershipIdentity {
+  id: string;
+  issuer: string;
+  subject: string;
+  email: string;
+  display_name: string;
+  is_active: boolean;
+}
+
+export interface MembershipDetail {
+  organization_id: string;
+  user: MembershipIdentity;
+  role: MembershipRole;
+  is_active: boolean;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MembershipProvisionPayload {
+  issuer: string;
+  subject: string;
+  email: string;
+  display_name: string;
+  role: MembershipRole;
+}
+
+export interface MembershipUpdatePayload {
+  expected_version: number;
+  role?: MembershipRole;
+  is_active?: boolean;
+}
+
+export interface IdentityAuditEvent {
+  id: string;
+  organization_id: string;
+  target_user_id: string;
+  event_type: string;
+  actor: string;
+  membership_version: number;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
 
 export type ConnectorProvider = "github" | "prometheus" | "slack";
 export type ConnectorStatus = "configured" | "disabled" | "invalid";
@@ -726,6 +774,33 @@ export async function switchOrganization(organizationId: string): Promise<AuthSe
 export async function deleteAuthSession(): Promise<void> {
   await request<void>("/api/v1/auth/session", { method: "DELETE" });
   setSessionCsrfToken(null);
+}
+
+export function getMemberships(): Promise<MembershipDetail[]> {
+  return request<MembershipDetail[]>("/api/v1/memberships");
+}
+
+export function getMembershipAudit(): Promise<IdentityAuditEvent[]> {
+  return request<IdentityAuditEvent[]>("/api/v1/memberships/audit");
+}
+
+export function provisionMembership(
+  payload: MembershipProvisionPayload,
+): Promise<MembershipDetail> {
+  return request<MembershipDetail>("/api/v1/memberships", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateMembership(
+  userId: string,
+  payload: MembershipUpdatePayload,
+): Promise<MembershipDetail> {
+  return request<MembershipDetail>(`/api/v1/memberships/${userId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function getConnectors(): Promise<ConnectorSummary[]> {

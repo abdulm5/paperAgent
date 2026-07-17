@@ -42,8 +42,9 @@ Each credential write uses envelope encryption:
 The configured key ring is indexed by exact key identifier; decryption never tries keys until one
 works. A new active key can wrap future writes while older keys keep existing envelopes readable.
 Bulk rewrapping onto a new key is deferred to a separately audited maintenance job. The local
-implementation satisfies the same `CredentialCipher` boundary that a managed KMS/HSM adapter can
-implement later.
+implementation satisfies the same `CredentialCipher` boundary. Phase 9E now supplies its production
+AWS KMS implementation; [ADR 0015](0015-production-credentials-use-aws-kms-data-keys.md) defines
+that workload-identity, encryption-context, concurrency, and deployment contract.
 
 Phase 9A validation proves provider-schema correctness and authenticated vault round-tripping. It
 does not claim an external GitHub, Prometheus, or Slack handshake; those network adapters arrive in
@@ -78,9 +79,9 @@ in its own vertical slice.
 
 - Losing a required key-encryption key makes its credentials intentionally undecryptable; key-ring
   backup and rotation become deployment responsibilities.
-- The local Compose stack shares one `.env` across backend processes for convenience. A production
-  deployment must inject the connector key ring only into the API or adapter process authorized to
-  decrypt credentials.
+- The local Compose stack shares one local key through `.env` for convenience. A production
+  deployment selects AWS KMS, grants only authorized workloads use of the exact key, and does not
+  inject a raw connector master key or static AWS credentials.
 - Connector configuration and audit payloads must use explicit allowlists, never arbitrary request
   dictionaries.
 - "Append-only" is currently an application and schema guarantee: there is no delete API, foreign

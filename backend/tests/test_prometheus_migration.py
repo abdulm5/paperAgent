@@ -76,7 +76,7 @@ def test_prometheus_contract_boundary_disables_and_audits_both_directions(
                 ],
             )
 
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260716_0010")
 
         with engine.connect() as connection:
             upgraded = connection.execute(

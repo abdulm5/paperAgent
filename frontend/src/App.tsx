@@ -6,6 +6,7 @@ import { IncidentDetailPanel } from "./components/IncidentDetailPanel";
 import { IncidentQueue } from "./components/IncidentQueue";
 import { EvaluationPanel } from "./components/EvaluationPanel";
 import { IdentityCheckpoint } from "./components/IdentityCheckpoint";
+import { OrganizationAccessPanel } from "./components/OrganizationAccessPanel";
 import {
   ApiError,
   createDevSession,
@@ -320,7 +321,7 @@ function IncidentLedger({
   onSwitchOrganization,
   session,
 }: IncidentLedgerProps) {
-  const [surface, setSurface] = useState<"incidents" | "connectors">("incidents");
+  const [surface, setSurface] = useState<"incidents" | "connectors" | "access">("incidents");
   const [incidents, setIncidents] = useState<IncidentSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<IncidentDetail | null>(null);
@@ -823,10 +824,21 @@ function IncidentLedger({
           >
             Connector custody
           </button>
+          {hasPermission(session, "memberships.read") ? (
+            <button
+              aria-pressed={surface === "access"}
+              onClick={() => setSurface("access")}
+              type="button"
+            >
+              Organization access
+            </button>
+          ) : null}
         </div>
       </nav>
 
-      {surface === "connectors" ? (
+      {surface === "access" ? (
+        <OrganizationAccessPanel session={session} />
+      ) : surface === "connectors" ? (
         <ConnectorCustodyPanel session={session} />
       ) : (
         <>

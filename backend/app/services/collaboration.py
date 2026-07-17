@@ -15,7 +15,9 @@ from sqlalchemy.orm import Session, selectinload
 from app.auth.constants import DEFAULT_ORGANIZATION_ID
 from app.connectors.contracts import ConnectorContractError, validate_configuration
 from app.connectors.runtime import (
+    GithubConnectorCustodyUnavailableError,
     GithubConnectorUnavailableError,
+    SlackConnectorCustodyUnavailableError,
     SlackConnectorUnavailableError,
     load_github_connector_runtime,
     load_slack_connector_runtime,
@@ -462,6 +464,15 @@ class CollaborationService:
                 runtime = load_slack_connector_runtime(self.session, output.connector_id)
             else:
                 runtime = load_github_connector_runtime(self.session, output.connector_id)
+        except (
+            SlackConnectorCustodyUnavailableError,
+            GithubConnectorCustodyUnavailableError,
+        ) as error:
+            self.session.rollback()
+            raise RetryableWorkflowError(
+                "Approved collaboration connector custody is temporarily unavailable",
+                code="collaboration_connector_custody_unavailable",
+            ) from error
         except (SlackConnectorUnavailableError, GithubConnectorUnavailableError) as error:
             self.session.rollback()
             raise PermanentWorkflowError(

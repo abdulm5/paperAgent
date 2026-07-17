@@ -18,7 +18,7 @@ from app.auth.dependencies import (
     require_permission,
 )
 from app.auth.service import AuthService, PrincipalNotFoundError
-from app.db.models import IncidentRecord, WorkflowEventRecord
+from app.db.models import AuthSessionRecord, IncidentRecord, WorkflowEventRecord
 from app.db.session import SessionLocal, get_db
 from app.domain.auth import Permission, Principal
 from app.domain.workflows import WorkflowRun
@@ -73,10 +73,63 @@ def encode_workflow_event(event: WorkflowEventRecord, workflow: WorkflowRun) -> 
     return f"id: {event.id}\nevent: workflow\ndata: {data}\n\n"
 
 
+def _refresh_stream_principal(
+    principal: Principal,
+    session_id: UUID,
+) -> Principal | None:
+    """Revalidate the durable session and current tenant authority."""
+    now = datetime.now(UTC)
+    with SessionLocal() as session:
+        active_session = session.scalar(
+            select(AuthSessionRecord).where(
+                AuthSessionRecord.id == session_id,
+                AuthSessionRecord.user_id == principal.user_id,
+                AuthSessionRecord.organization_id == principal.organization_id,
+            )
+        )
+        if active_session is None or active_session.revoked_at is not None:
+            return None
+        active_session_expiry = active_session.expires_at
+        if active_session_expiry.tzinfo is None:
+            active_session_expiry = active_session_expiry.replace(tzinfo=UTC)
+        if active_session_expiry <= now:
+            return None
+        try:
+            refreshed = AuthService(session).load_principal(
+                principal.user_id,
+                principal.organization_id,
+            )
+        except PrincipalNotFoundError:
+            return None
+        if Permission.INCIDENTS_READ not in refreshed.permissions:
+            return None
+        return refreshed
+
+
+def _materialize_workflow_events(
+    principal: Principal,
+    cursor: int,
+) -> list[tuple[int, str]]:
+    """Encode a bounded batch before the database context is closed."""
+    with SessionLocal() as session:
+        store = WorkflowStore(session, principal.organization_id)
+        events = store.events_after(cursor, limit=100)
+        workflow_snapshots: dict[UUID, WorkflowRun] = {}
+        payloads: list[tuple[int, str]] = []
+        for event in events:
+            workflow = workflow_snapshots.get(event.workflow_run_id)
+            if workflow is None:
+                workflow = store.get_detail(event.workflow_run_id)
+                workflow_snapshots[event.workflow_run_id] = workflow
+            payloads.append((event.id, encode_workflow_event(event, workflow)))
+        return payloads
+
+
 async def workflow_event_stream(
     request: Request,
     *,
     principal: Principal,
+    session_id: UUID,
     session_expires_at: datetime,
     last_event_id: int = 0,
     poll_seconds: float = 1.0,
@@ -86,26 +139,27 @@ async def workflow_event_stream(
     while not await request.is_disconnected():
         if datetime.now(UTC) >= session_expires_at:
             return
-        emitted = False
-        with SessionLocal() as session:
-            try:
-                refreshed = AuthService(session).load_principal(
-                    principal.user_id,
-                    principal.organization_id,
-                )
-            except PrincipalNotFoundError:
+        refreshed = _refresh_stream_principal(principal, session_id)
+        if refreshed is None:
+            return
+        principal = refreshed
+        events = _materialize_workflow_events(principal, cursor)
+        for event_id, payload in events:
+            if await request.is_disconnected() or datetime.now(UTC) >= session_expires_at:
                 return
-            if Permission.INCIDENTS_READ not in refreshed.permissions:
+            refreshed = _refresh_stream_principal(principal, session_id)
+            if refreshed is None:
                 return
             principal = refreshed
-            store = WorkflowStore(session, principal.organization_id)
-            events = store.events_after(cursor, limit=100)
-            for event in events:
-                workflow = store.get_detail(event.workflow_run_id)
-                yield encode_workflow_event(event, workflow)
-                cursor = event.id
-                emitted = True
-        if not emitted and monotonic() - last_heartbeat >= 15:
+            yield payload
+            cursor = event_id
+        if not events and monotonic() - last_heartbeat >= 15:
+            if await request.is_disconnected() or datetime.now(UTC) >= session_expires_at:
+                return
+            refreshed = _refresh_stream_principal(principal, session_id)
+            if refreshed is None:
+                return
+            principal = refreshed
             yield ": keepalive\n\n"
             last_heartbeat = monotonic()
         await asyncio.sleep(poll_seconds)
@@ -144,6 +198,7 @@ def stream_workflow_events(
         workflow_event_stream(
             request,
             principal=principal,
+            session_id=authenticated.claims.session_id,
             session_expires_at=authenticated.claims.expires_at,
             last_event_id=cursor,
         ),

@@ -8,12 +8,19 @@ from sqlalchemy.orm import Session
 from app.auth.constants import DEFAULT_ORGANIZATION_ID, DEFAULT_ORGANIZATION_SLUG
 from app.auth.dependencies import get_current_principal
 from app.auth.permissions import permissions_for_role
-from app.connectors.vault import CredentialContext, SealedCredentials, build_credential_cipher
+from app.connectors.vault import (
+    CredentialContext,
+    CredentialCustodyUnavailableError,
+    SealedCredentials,
+    build_credential_cipher,
+)
 from app.db.models import (
     ConnectorAuditEventRecord,
     ConnectorCredentialRecord,
     ConnectorRecord,
+    OrganizationMembershipRecord,
     OrganizationRecord,
+    UserRecord,
 )
 from app.domain.auth import Principal, Role
 from app.domain.connectors import ConnectorProvider
@@ -74,6 +81,31 @@ def stub_github_provider_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
         "app.services.connectors.build_slack_publisher",
         lambda _configuration, _credentials: StubSlackPublisher(),
     )
+
+
+@pytest.fixture(autouse=True)
+def provision_connector_admin(db_session: Session) -> None:
+    """Mirror the hosted prerequisite enforced after external connector I/O."""
+
+    db_session.add(
+        UserRecord(
+            id=TEST_USER_ID,
+            issuer="urn:pageragent:test",
+            subject="connector-admin",
+            email="connector-admin@example.com",
+            display_name="Connector Admin",
+            is_active=True,
+        )
+    )
+    db_session.add(
+        OrganizationMembershipRecord(
+            organization_id=DEFAULT_ORGANIZATION_ID,
+            user_id=TEST_USER_ID,
+            role=Role.ADMIN.value,
+            is_active=True,
+        )
+    )
+    db_session.commit()
 
 
 def github_connector(
@@ -247,6 +279,26 @@ def test_connector_lifecycle_is_versioned_disabled_by_default_and_never_returns_
     assert client.delete(f"/api/v1/connectors/{created['id']}").status_code == 405
 
 
+def test_metadata_only_connector_reads_do_not_construct_the_credential_cipher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(app)
+    created = client.post("/api/v1/connectors", json=github_connector())
+    assert created.status_code == 201
+
+    def unexpected_cipher_construction() -> None:
+        raise AssertionError("cipher must stay lazy")
+
+    monkeypatch.setattr(
+        "app.services.connectors.build_credential_cipher",
+        unexpected_cipher_construction,
+    )
+
+    assert client.get("/api/v1/connectors").status_code == 200
+    assert client.get(f"/api/v1/connectors/{created.json()['id']}").status_code == 200
+    assert client.get(f"/api/v1/connectors/{created.json()['id']}/events").status_code == 200
+
+
 def test_multiline_github_pem_is_preserved_in_the_sealed_envelope_and_never_returned(
     db_session: Session,
 ) -> None:
@@ -312,6 +364,7 @@ def test_failed_github_handshake_is_sanitized_and_cannot_enable_connector(
         "app.services.connectors.build_github_provider",
         lambda _configuration, _credentials: FailingGitHubProvider(),
     )
+
     client = TestClient(app)
     created = client.post("/api/v1/connectors", json=github_connector()).json()
 
@@ -333,6 +386,34 @@ def test_failed_github_handshake_is_sanitized_and_cannot_enable_connector(
         ).status_code
         == 409
     )
+
+
+def test_transient_kms_validation_outage_returns_503_without_mutating_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnavailableCipher:
+        def open(self, _sealed: SealedCredentials, _context: CredentialContext):
+            raise CredentialCustodyUnavailableError("sensitive KMS transport detail")
+
+    client = TestClient(app)
+    created = client.post("/api/v1/connectors", json=github_connector()).json()
+    monkeypatch.setattr(
+        "app.services.connectors.build_credential_cipher",
+        lambda: UnavailableCipher(),
+    )
+
+    response = client.post(
+        f"/api/v1/connectors/{created['id']}/validate",
+        json={"expected_version": created["version"]},
+    )
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "5"
+    assert "sensitive KMS transport detail" not in response.text
+    persisted = client.get(f"/api/v1/connectors/{created['id']}").json()
+    assert persisted["version"] == created["version"]
+    assert persisted["status"] == "disabled"
+    assert persisted["last_validation_ok"] is None
 
 
 def test_only_one_enabled_github_connector_can_own_a_service_binding() -> None:
@@ -821,6 +902,14 @@ def test_duplicate_name_is_tenant_scoped_and_returns_sanitized_conflict(
     other_id = UUID("00000000-0000-0000-0000-000000000002")
     db_session.add(
         OrganizationRecord(id=other_id, slug="other-operations", name="Other Operations")
+    )
+    db_session.add(
+        OrganizationMembershipRecord(
+            organization_id=other_id,
+            user_id=TEST_USER_ID,
+            role=Role.ADMIN.value,
+            is_active=True,
+        )
     )
     db_session.commit()
     app.dependency_overrides[get_current_principal] = lambda: principal(Role.ADMIN, other_id)

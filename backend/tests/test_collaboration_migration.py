@@ -25,7 +25,7 @@ def test_empty_collaboration_migration_round_trips_on_sqlite(tmp_path: Path) -> 
     try:
         settings.database_url = database_url
         config = _migration_config()
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260717_0011")
         engine = create_engine(database_url)
         inspector = inspect(engine)
         assert {
@@ -85,7 +85,7 @@ def test_empty_collaboration_migration_round_trips_on_sqlite(tmp_path: Path) -> 
 
         command.downgrade(config, "20260716_0010")
         assert "collaboration_outputs" not in inspect(engine).get_table_names()
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260717_0011")
         assert "collaboration_outputs" in inspect(engine).get_table_names()
     finally:
         settings.database_url = previous_url
@@ -133,7 +133,7 @@ def test_phase9d_disables_legacy_slack_on_upgrade_and_downgrade(
                 )
             )
 
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260717_0011")
         with engine.connect() as connection:
             upgraded = connection.execute(
                 connectors.select().where(connectors.c.id == connector_id.hex)
@@ -186,7 +186,7 @@ def test_phase9d_downgrade_refuses_to_discard_a_populated_approval_ledger(
     try:
         settings.database_url = database_url
         config = _migration_config()
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260717_0011")
         engine = create_engine(database_url)
         metadata = MetaData()
         outputs = Table("collaboration_outputs", metadata, autoload_with=engine)

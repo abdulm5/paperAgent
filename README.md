@@ -4,33 +4,38 @@ PagerAgent is an evidence-grounded incident-response copilot. It helps an on-cal
 
 ## Project status
 
-**Phase 9D — durable collaboration outputs.** PagerAgent can now turn a grounded proposal into a
-separately approved Slack update or GitHub issue. Approval atomically enters the existing
-PostgreSQL outbox workflow, leased workers reconcile a stable provider-visible delivery marker
-before every write, and normalized receipts, retries, and dead letters remain visible without
-claiming an impossible cross-provider exactly-once transaction.
+**Phase 9E — hosted identity, administration, and managed key custody.** PagerAgent now completes
+OIDC Authorization Code + PKCE as a backend-for-frontend, maps every internal JWT to a revocable
+PostgreSQL session, and gives organization admins a versioned, audited membership surface.
+Production connector envelopes use AWS KMS data keys through workload identity, with every KMS and
+provider call outside database transactions and authority/revision checks before stale work can
+commit. A one-shot audited offline command safely establishes the first hosted administrator.
 
 ## The interview story
 
 PagerAgent is designed around a simple principle: the model synthesizes evidence; deterministic tools collect and score it. The complete flow is:
 
-1. A signed user session selects one active organization and receives an exact permission receipt.
-2. An administrator provisions a disabled provider connector through a typed contract; PagerAgent
+1. A local persona or hosted OIDC Authorization Code + PKCE transaction creates a revocable,
+   database-backed PagerAgent session for one active organization and exact permission receipt.
+2. An administrator provisions stable issuer/subject memberships and changes roles or active state
+   through optimistic versions, last-admin safeguards, and immutable audit receipts.
+3. An administrator provisions a disabled provider connector through a typed contract; PagerAgent
    seals its write-only credential with a per-revision data key and records a sanitized custody
-   event before the connector can be validated and enabled.
-3. Provider validation happens outside database locks, then compare-and-swaps the connector and
+   event before the connector can be validated and enabled. Hosted envelopes wrap that data key
+   with an exact AWS KMS key and tenant/revision encryption context.
+4. Provider validation happens outside database locks, then compare-and-swaps the connector and
    credential revisions. GitHub uses a repository-scoped installation token; Prometheus uses one
    fixed credential-bearing read query.
-4. A versioned simulator scenario introduces a code, configuration, or dependency failure.
-5. Tenant-authenticated telemetry crosses an alert threshold and atomically creates an incident, durable workflow, first job, workflow events, and outbox message in PostgreSQL.
-6. A separate relay publishes the job to Redis Streams; a database-leased worker gathers telemetry,
+5. A versioned simulator scenario introduces a code, configuration, or dependency failure.
+6. Tenant-authenticated telemetry crosses an alert threshold and atomically creates an incident, durable workflow, first job, workflow events, and outbox message in PostgreSQL.
+7. A separate relay publishes the job to Redis Streams; a database-leased worker gathers telemetry,
    bounded Prometheus metrics, normalized GitHub evidence, and runbooks, then ranks causal signals.
-7. PagerAgent proposes a cited typed action—or blocks automation when the evidence points outside its authority—without losing work if a process restarts.
-8. An authorized human approves or rejects the proposal. Approval atomically queues a separate mitigation workflow instead of performing the external write in the request.
-9. Slack updates and GitHub issues require another explicit collaboration decision. Approval freezes the grounded content, destination, and connector revisions before atomically entering the outbox.
-10. The worker executes the allow-listed mitigation or reconciles the collaboration delivery marker before one remote write, then records recovery or a normalized provider receipt.
-11. Resolution queues a durable postmortem workflow; the resulting cited report can be revised, finalized, and exported.
-12. The tenant-filtered workflow recorder follows every queue, lease, retry, completion, and dead-letter event through a replayable server-sent event stream.
+8. PagerAgent proposes a cited typed action—or blocks automation when the evidence points outside its authority—without losing work if a process restarts.
+9. An authorized human approves or rejects the proposal. Approval atomically queues a separate mitigation workflow instead of performing the external write in the request.
+10. Slack updates and GitHub issues require another explicit collaboration decision. Approval freezes the grounded content, destination, and connector revisions before atomically entering the outbox.
+11. The worker executes the allow-listed mitigation or reconciles the collaboration delivery marker before one remote write, then records recovery or a normalized provider receipt.
+12. Resolution queues a durable postmortem workflow; the resulting cited report can be revised, finalized, and exported.
+13. The tenant-filtered workflow recorder follows every queue, lease, retry, completion, and dead-letter event through a replayable server-sent event stream.
 
 ## Repository layout
 
@@ -64,10 +69,34 @@ Once running:
 The included dashboard opens at a local-only identity checkpoint. Start as the viewer to inspect
 read-only behavior, then use responder, incident commander, and admin personas to demonstrate the
 exact RBAC boundary. Every persona can switch to an empty sandbox organization to demonstrate state
-and SSE isolation. Outside local/test, PagerAgent disables personas, fails startup on development
-secrets, and exposes a fixed-issuer OIDC token exchange for the same HttpOnly PagerAgent session.
-The provider-specific authorization redirect/callback and PKCE browser bootstrap are intentionally
-not claimed by this phase; that hosted identity-provider adapter is planned for Phase 9E.
+and SSE isolation. The admin-only **Organization access** panel provisions stable OIDC subjects,
+applies versioned role/status changes, and shows their audit receipts.
+The stock local environment accepts only the demo issuer
+`https://identity.pageragent.local`; hosted deployments replace it with their exact IdP issuer.
+
+Outside local/test, PagerAgent disables personas and the direct token-exchange shortcut, fails
+startup on incomplete production boundaries, and performs OIDC Authorization Code + PKCE through
+server-owned login and callback routes. Provider tokens never enter React or the PagerAgent cookie;
+the final browser credential is a revocable HttpOnly PagerAgent session. The local stack keeps the
+deterministic AES-GCM connector cipher. Hosted deployments select AWS KMS, use the standard workload
+credential chain, and must supply IAM/key policy, CloudTrail, egress, and rotation controls.
+
+After hosted migrations and IdP registration, establish the first administrator offline from
+`backend/` (there is intentionally no public bootstrap endpoint):
+
+```bash
+python -m app.memberships.bootstrap \
+  --organization pageragent-production \
+  --organization-name "PagerAgent Production" \
+  --issuer https://identity.example.com \
+  --subject 00u-stable-idp-subject \
+  --email admin@example.com \
+  --display-name "PagerAgent Admin"
+```
+
+The command requires the exact configured issuer, refuses when an active admin exists, and writes
+an immutable `bootstrap:offline` receipt. See the Phase 9E walkthrough for production `__Host-`
+cookie names, ingress callback-log redaction/rate limits, and the complete KMS contract.
 
 To demonstrate the connector custody boundary independently from an incident:
 
@@ -188,19 +217,23 @@ cd frontend && npm install && npm run dev
 5. Postmortem (complete): grounded generation after resolution, exact timelines, immutable revisions, explicit finalization, prevention ownership, and Markdown export.
 6. Evaluation expansion (complete): versioned multi-cause scenarios, cross-signal causal ranking, authority-aware actions, adversarial probes, and a visible reliability scorecard.
 7. Durable orchestration (complete): transactional outbox, verified Redis Streams repair, leased attempts with commit fencing, retries and dead letters, replay-safe side effects, commit-ordered SSE workflow receipts, and trace correlation.
-8A. Identity boundary (complete): fixed-issuer OIDC token verification and session exchange, database-backed membership and RBAC, server-derived actors, tenant-isolated incident/workflow access, CSRF protection, machine-authenticated alert ingestion, and server-controlled telemetry destinations.
+8A. Identity boundary (complete): fixed-issuer OIDC token verification, database-backed membership and RBAC, server-derived actors, tenant-isolated incident/workflow access, CSRF protection, machine-authenticated alert ingestion, and server-controlled telemetry destinations.
 9A. Connector control plane (complete): tenant-owned provider contracts, write-only credential APIs, per-revision AES-GCM envelope encryption, exact-key rotation, optimistic updates, safe disabled defaults, RBAC, and append-only custody events.
 9B. GitHub evidence (complete): multiline App-key custody, repository-scoped installation authorization, two-phase provider validation, signed webhook verification, durable replay protection, bounded/rate-aware REST collection, and normalized commit/PR/deployment/release evidence.
 9C.1. Prometheus evidence (complete): server-owned PromQL catalog, bounded range collection, revision-fenced tenant/service selection, immutable metric snapshots, and conservative causal corroboration.
 9C.2. Logs and traces (planned): bounded, backend-specific APIs for OpenTelemetry-derived telemetry.
 9D. Collaboration outputs (complete): separately approved server-grounded Slack updates and GitHub issues, atomic outbox enqueueing, revision-fenced workers, bounded provider-marker reconciliation, normalized delivery receipts, retries, and dead letters.
-9E. Hosted identity and administration (planned): provider-specific OIDC authorization-code/PKCE login and membership administration.
+9E. Hosted identity and administration (complete): bounded server-owned OIDC authorization-code/PKCE login, revocable database sessions and SSE authority, audited first-admin bootstrap and optimistic membership administration, plus retry-aware AWS KMS connector data-key custody through workload identity.
 
-See [the Phase 9D walkthrough](docs/milestones/09d-durable-collaboration.md) and
-[ADR 0013](docs/decisions/0013-collaboration-delivery-is-reconciled-not-exactly-once.md) for the
+See [the Phase 9E walkthrough](docs/milestones/09e-hosted-identity-and-kms.md),
+[ADR 0014](docs/decisions/0014-hosted-login-is-a-bff-transaction.md), and
+[ADR 0015](docs/decisions/0015-production-credentials-use-aws-kms-data-keys.md) for the hosted
+browser, revocable-session, membership-administration, and managed-key boundaries.
+[The Phase 9D walkthrough](docs/milestones/09d-durable-collaboration.md) and
+[ADR 0013](docs/decisions/0013-collaboration-delivery-is-reconciled-not-exactly-once.md) cover the
 separate communication approval, provider-marker reconciliation, and dead-letter boundary.
 [The Phase 9C.1 walkthrough](docs/milestones/09c-observability-evidence.md) and
-[ADR 0012](docs/decisions/0012-observability-evidence-is-bounded-before-it-is-causal.md) for the
+[ADR 0012](docs/decisions/0012-observability-evidence-is-bounded-before-it-is-causal.md) cover the
 Prometheus query, network, and causal boundary. [The Phase 9B walkthrough](docs/milestones/09b-github-evidence.md)
 and [ADR 0011](docs/decisions/0011-github-deliveries-are-authenticated-idempotent-inputs.md) cover
 the GitHub trust boundary. [Phase 9A](docs/milestones/09a-connector-control-plane.md) and

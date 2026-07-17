@@ -10,6 +10,7 @@ from app.api.routes.github_webhooks import router as github_webhooks_router
 from app.api.routes.health import router as health_router
 from app.api.routes.incidents import router as incidents_router
 from app.api.routes.investigations import router as investigations_router
+from app.api.routes.memberships import router as memberships_router
 from app.api.routes.postmortems import incident_router as incident_postmortem_router
 from app.api.routes.postmortems import postmortem_router
 from app.api.routes.proposals import incident_router as incident_proposals_router
@@ -19,6 +20,7 @@ from app.api.routes.workflows import router as workflows_router
 api_router = APIRouter()
 api_router.include_router(health_router)
 api_router.include_router(auth_router)
+api_router.include_router(memberships_router)
 api_router.include_router(connectors_router)
 api_router.include_router(incident_collaboration_router)
 api_router.include_router(collaboration_output_router)

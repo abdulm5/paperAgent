@@ -17,6 +17,8 @@ from app.domain.connectors import (
 )
 from app.services.connectors import (
     ConnectorAuditIntegrityError,
+    ConnectorAuthorityChangedError,
+    ConnectorCustodyUnavailableError,
     ConnectorEnablementError,
     ConnectorNameConflictError,
     ConnectorNotFoundError,
@@ -74,6 +76,7 @@ def create_connector(
         return ConnectorService(session, principal.organization_id).create_connector(
             request,
             actor=principal.actor,
+            actor_user_id=principal.user_id,
         )
     except ConnectorNameConflictError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
@@ -83,6 +86,16 @@ def create_connector(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(error),
+        ) from error
+    except ConnectorCustodyUnavailableError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+        ) from error
+    except ConnectorAuthorityChangedError as error:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "membership_inactive", "message": str(error)},
         ) from error
 
 
@@ -127,6 +140,7 @@ def put_connector_credentials(
             connector_id,
             request,
             actor=principal.actor,
+            actor_user_id=principal.user_id,
         )
     except ConnectorNotFoundError as error:
         raise _not_found() from error
@@ -139,6 +153,16 @@ def put_connector_credentials(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(error),
+        ) from error
+    except ConnectorCustodyUnavailableError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+        ) from error
+    except ConnectorAuthorityChangedError as error:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "membership_inactive", "message": str(error)},
         ) from error
 
 
@@ -154,6 +178,7 @@ def validate_connector(
             connector_id,
             request.expected_version,
             actor=principal.actor,
+            actor_user_id=principal.user_id,
         )
     except ConnectorNotFoundError as error:
         raise _not_found() from error
@@ -161,6 +186,17 @@ def validate_connector(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"message": str(error), "current_version": error.current_version},
+        ) from error
+    except ConnectorCustodyUnavailableError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+            headers={"Retry-After": "5"},
+        ) from error
+    except ConnectorAuthorityChangedError as error:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "membership_inactive", "message": str(error)},
         ) from error
 
 

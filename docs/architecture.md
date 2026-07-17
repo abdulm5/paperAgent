@@ -35,10 +35,10 @@ The LLM is deliberately downstream of evidence gathering. It can summarize, comp
 | Component | Current responsibility | Later responsibility |
 | --- | --- | --- |
 | `simulator/` | Reproduce code, configuration, and upstream-dependency failures | Add production-like distributed services |
-| `backend/` | Authenticate identities, enforce organization membership and RBAC, custody typed connector credentials, collect bounded GitHub and Prometheus evidence, persist incidents and workflows, relay a transactional outbox, execute database-leased jobs, rank causes, validate grounded briefs, enforce approval policy, deliver approved collaboration outputs, verify recovery, and version postmortems | Add backend-specific log/trace adapters |
-| PostgreSQL | Own connector metadata, encrypted credential envelopes, custody events, verified inbound and outbound provider receipts, content-hashed evidence, incident state, workflows, leases, results, and unpublished outbox messages | Move to a managed high-availability deployment |
+| `backend/` | Complete hosted OIDC login, enforce revocable organization membership and RBAC, custody typed connector credentials, collect bounded GitHub and Prometheus evidence, persist incidents and workflows, relay a transactional outbox, execute database-leased jobs, rank causes, validate grounded briefs, enforce approval policy, deliver approved collaboration outputs, verify recovery, and version postmortems | Add backend-specific log/trace adapters |
+| PostgreSQL | Own single-use login transactions, revocable sessions, versioned memberships and identity audits, connector metadata and encrypted envelopes, custody events, verified provider receipts, content-hashed evidence, incident state, workflows, leases, results, and unpublished outbox messages | Move to a managed high-availability deployment |
 | Redis Streams | Wake workers with at-least-once delivery, consumer groups, pending-message reclaim, and a dead-letter stream | Move to a managed transport and tune retention |
-| `frontend/` | Present the signed organization scope, exact permission receipt, connector custody ledger, evidence, causal rankings, evaluation gates, workflow and collaboration delivery receipts, recovery receipts, and postmortem document control | Add membership administration |
+| `frontend/` | Present the signed organization scope, exact permission receipt, audited membership administration, connector custody ledger, evidence, causal rankings, evaluation gates, workflow and collaboration delivery receipts, recovery receipts, and postmortem document control | Add hosted deployment administration |
 | `runbooks/` | Supply versioned procedures to hybrid retrieval | Source grounded mitigation steps |
 | `scenarios/` | Define versioned simulation, ground truth, adversarial cases, and thresholds | Grow a reviewed incident corpus |
 | `evals/` | Score cause ranking, retrieval, impact, traceability, action safety, authority, and resilience | Add model-provider comparison and historical trends |
@@ -61,10 +61,12 @@ their incident and organization from PostgreSQL instead of trusting the Redis pa
 
 Local browser sessions use an HTTP-only `SameSite=Strict` cookie. Unsafe cookie-authenticated
 requests also require a per-session CSRF header, while local CLI demos use the same signed session
-as a Bearer credential. The production-facing OIDC exchange proves external identity through a
-fixed issuer, audience, JWKS endpoint, and algorithm allow-list before PagerAgent checks locally
-provisioned membership. Provider-specific browser redirect, callback, and PKCE wiring is a Phase 9E
-integration rather than an implicit claim of the included local dashboard.
+as a Bearer credential. Hosted login is a backend-for-frontend OIDC Authorization Code flow with
+PKCE `S256`: PagerAgent creates a single-use encrypted login transaction, binds it to a temporary
+HttpOnly browser cookie, consumes it before code exchange, verifies issuer/audience/azp/nonce/time,
+and redirects only to the configured frontend. Provider tokens never enter React or the application
+session. Every signed PagerAgent JWT identifies an unexpired, unrevoked PostgreSQL session row;
+current membership and role are still reloaded on every request.
 Human audit actors are derived from that principal. Monitoring uses a separate tenant-bound machine
 ingest key; the alert body cannot select its organization. Telemetry collection accepts only
 server-configured origins and applies URL, redirect, DNS, and IP-range policy before fetching.
@@ -72,10 +74,14 @@ server-configured origins and applies URL, redirect, DNS, and IP-range policy be
 Connectors use the same organization boundary and add a narrower credential-custody boundary.
 Incident commanders can read non-secret connector state; only administrators can write, validate,
 or enable it. Provider schemas divide ordinary configuration from write-only credential fields.
-Each credential revision is encrypted under a fresh random data-encryption key, and that key is
-wrapped by an exact-version key-encryption key. Authenticated associated data binds the envelope to
-its organization, connector, provider, revision, and key identifier, so copied or edited rows fail
-closed. API responses and allowlisted audit payloads reveal field presence and revision only.
+Each credential revision is encrypted under a fresh random data-encryption key. Local development
+wraps that key with an exact-version AES-GCM key; production obtains and wraps it through AWS KMS
+`GenerateDataKey` under an exact key ARN and immutable tenant/connector/revision encryption context.
+Authenticated associated data binds the payload to that same context, so copied or edited rows fail
+closed. The SDK uses workload identity rather than configured static AWS credentials. KMS calls run
+outside database transactions and their results pass connector/credential revision checks before
+commit or runtime use. API responses and allowlisted audit payloads reveal field presence and
+revision only.
 The Phase 9A generic validation checked provider schema and vault integrity without making an
 external request. GitHub, Prometheus, and Slack validators now snapshot the connector and credential
 revision, end the database transaction, perform their bounded provider handshake, then lock and
@@ -365,6 +371,57 @@ writing; an incomplete scan or contradictory match fails closed. This is intenti
 as reconciliation-backed, effectively-once domain behavior over at-least-once workflow delivery.
 PostgreSQL cannot atomically commit with either provider, so the architecture makes that ambiguity
 and its repair receipt visible instead of labeling it exactly once.
+
+## Phase 9E hosted identity and managed-key path
+
+```text
+browser login
+    │ state + nonce + browser binding + PKCE S256
+    ▼
+encrypted single-use OIDC transaction ──► fixed IdP authorization endpoint
+    │ code callback: verify + consume before provider I/O
+    ▼
+fixed token endpoint → verified issuer/subject/nonce → active membership
+    │
+    └──► revocable PostgreSQL session → HttpOnly PagerAgent cookie
+
+organization admin + expected membership version
+    │ recheck active admin under organization lock
+    ▼
+self/last-admin policy → membership update + immutable identity audit
+
+connector credential snapshot → end DB transaction → AWS KMS data-key operation
+    │ exact key ARN + organization/connector/provider/revision context
+    ▼
+AES-GCM payload envelope → lock/read current revisions → commit or discard
+```
+
+State, nonce, browser binding, and verifier are independent random values. PostgreSQL retains only
+their hashes and an AES-GCM-encrypted verifier; the browser cookie contains only the temporary
+binding. Pending transaction counts and cleanup are serialized by organization so unauthenticated
+login starts cannot grow durable state without bound. The callback cannot choose endpoints,
+tenants, or return locations, and provider tokens never cross the browser boundary. Logout revokes
+the session row, organization switching replaces it, membership deactivation revokes its active
+rows, and SSE rechecks that authority before every event rather than only at connection time.
+Hosted ingress exposes the frontend, relative API, and OIDC callback on one browser origin so
+host-only `__Host-` cookies cannot be tossed by sibling subdomains or stranded on an API hostname.
+
+Membership administration uses stable issuer plus subject identity, never email linking. Admins
+can list, provision, deactivate, or change roles only inside the active organization. Optimistic
+versions reject stale tabs, while self-demotion and last-active-admin checks preserve an
+administration path. Every accepted mutation appends a sanitized version-correlated audit receipt.
+The first admin comes from a one-shot offline exact-subject bootstrap with its own receipt; there is
+no unauthenticated bootstrap route.
+
+Production credential custody uses the AWS SDK workload credential chain; PagerAgent exposes no
+static AWS credential settings. The application requires a full key ARN, matching region, and no
+custom endpoint or local decryption ring outside development. IAM roles, KMS key policy, CloudTrail,
+egress/VPC endpoints, key rotation, backup, and recovery remain explicit infrastructure duties,
+not capabilities silently claimed by this repository.
+KMS clients have bounded timeouts and retries, stored envelopes are pinned to the configured key
+ARN, and transient custody outages are retried without relabeling integrity failures as transient.
+One stable KMS application identifier is shared by API and worker processes; their distinct
+telemetry service names never become part of credential cryptographic authority.
 
 Connector credentials are decrypted only at the final adapter boundary. Redis sees only the
 internal output ID, and workflow failures carry an allowlisted provider error code rather than raw

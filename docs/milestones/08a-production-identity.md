@@ -4,6 +4,10 @@ Phase 8A changes PagerAgent from a trusted single-operator dashboard into an aut
 organization-scoped incident command surface. It intentionally stops before external evidence and
 action connectors so the security boundary can be explained and tested on its own.
 
+> Historical milestone note: Phase 9E now completes the hosted Authorization Code + PKCE browser
+> flow, revocable session registry, and membership administration described as deferred below. See
+> [the Phase 9E walkthrough](09e-hosted-identity-and-kms.md) for the current production contract.
+
 ## What this milestone proves
 
 - A valid token is necessary but not sufficient: the user must also have an active database
@@ -32,27 +36,18 @@ explain disabled controls, but the API remains the authoritative enforcement poi
 
 ### Browser session
 
-1. Local development selects a seeded persona, or an external OIDC client submits a verified
-   identity token to the exchange endpoint.
-2. PagerAgent verifies identity and loads active organization membership from PostgreSQL.
-3. PagerAgent issues a short-lived internal JWT as an HTTP-only, same-origin cookie.
-4. REST, Markdown export, and native workflow `EventSource` requests carry that cookie.
+1. Local development selects a seeded persona. Hosted browsers begin a server-owned OIDC
+   Authorization Code + PKCE login.
+2. PagerAgent verifies the single-use state, browser binding, nonce, provider signature, issuer,
+   audience, and stable subject, then loads active organization membership from PostgreSQL.
+3. PagerAgent creates a revocable database session and issues its short-lived JWT as an HTTP-only,
+   same-origin cookie. Provider tokens remain server-side and ephemeral.
+4. REST, Markdown export, and native workflow `EventSource` requests carry that cookie and require
+   the matching unrevoked session row plus current membership.
 5. Unsafe cookie-authenticated requests must also present the in-memory CSRF token.
 
-The repository implements the provider-neutral verification and exchange boundary. It does not
-pretend to provide a hosted identity-provider login: authorization-code redirect/callback, PKCE,
-state, and nonce handling depend on the selected provider and are deferred to the Phase 8B adapter.
-Consequently, the included React identity checkpoint is deliberately local-only.
-
-An external OIDC client completes its provider flow, then calls the neutral exchange contract:
-
-```http
-POST /api/v1/auth/oidc/exchange
-Authorization: Bearer <provider-id-token>
-Content-Type: application/json
-
-{"organization_id":"<provisioned-membership-organization-id>"}
-```
+The earlier direct ID-token exchange remains available only to local/test compatibility clients.
+Hosted deployments return `404` for that shortcut and use the fixed login/callback transaction.
 
 ### CLI session
 
@@ -72,21 +67,35 @@ environments may not.
 
 ## Non-development configuration
 
-PagerAgent fails startup outside `local` and `test` unless OIDC is selected, its issuer, audience,
-and JWKS settings are complete HTTPS values, cookies are secure, CORS names explicit HTTPS origins,
-the telemetry origin allowlist is non-empty and HTTPS-only, and both the session-signing secret and
-ingest key are non-development values of at least 32 characters.
+PagerAgent fails startup outside `local` and `test` unless hosted OIDC browser settings, secure
+cookies, KMS credential custody, explicit HTTPS origins, and non-development session, transaction,
+and ingest secrets are complete. The current exhaustive example lives in the
+[Phase 9E production configuration contract](09e-hosted-identity-and-kms.md#production-configuration-contract).
 
 ```dotenv
 PAGERAGENT_ENV=production
 PAGERAGENT_AUTH_MODE=oidc
 PAGERAGENT_SESSION_SECRET=<random-secret-at-least-32-characters>
 PAGERAGENT_SESSION_COOKIE_SECURE=true
+PAGERAGENT_SESSION_COOKIE_NAME=__Host-pageragent_session
 PAGERAGENT_OIDC_ISSUER=https://identity.example.com
 PAGERAGENT_OIDC_AUDIENCE=pageragent-api
 PAGERAGENT_OIDC_JWKS_URL=https://identity.example.com/.well-known/jwks.json
+PAGERAGENT_OIDC_CLIENT_ID=pageragent-api
+PAGERAGENT_OIDC_CLIENT_SECRET=<managed-client-secret>
+PAGERAGENT_OIDC_AUTHORIZATION_URL=https://identity.example.com/oauth2/authorize
+PAGERAGENT_OIDC_TOKEN_URL=https://identity.example.com/oauth2/token
+PAGERAGENT_OIDC_REDIRECT_URI=https://pageragent.example.com/api/v1/auth/oidc/callback
+PAGERAGENT_OIDC_FRONTEND_URL=https://pageragent.example.com
+PAGERAGENT_OIDC_DEFAULT_ORGANIZATION_SLUG=pageragent-production
+PAGERAGENT_OIDC_TRANSACTION_KEY=<canonical-base64-encoded-32-byte-key>
+PAGERAGENT_OIDC_LOGIN_COOKIE_NAME=__Host-pageragent_oidc_login
 PAGERAGENT_INGEST_API_KEY=<random-ingest-key-at-least-32-characters>
 PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS=https://telemetry.example.com
+PAGERAGENT_CONNECTOR_CIPHER_PROVIDER=aws_kms
+PAGERAGENT_CONNECTOR_KMS_KEY_ARN=arn:aws:kms:us-east-1:123456789012:key/<key-id>
+PAGERAGENT_CONNECTOR_KMS_REGION=us-east-1
+PAGERAGENT_CONNECTOR_KMS_APPLICATION_ID=pageragent
 BACKEND_CORS_ORIGINS=https://pageragent.example.com
 ```
 
@@ -129,11 +138,15 @@ PagerAgent's database proves where that person is a member and what they can do 
 query carries the organization boundary, while explicit permissions protect mutations. The UI
 makes that authority visible, but backend denial and tenant-isolation tests are the real control.
 
-## Deferred to Phase 8B
+## Completed after Phase 8A
 
-- Provider-specific authorization-code redirect/callback, PKCE, state, and nonce integration
-- Production evidence connectors and encrypted connector credentials
-- Signed third-party webhooks and per-connector service principals
-- Membership administration UI and invitations
+- Phase 9A added typed connector contracts and envelope encryption.
+- Phase 9B added GitHub App evidence and signed webhook ingestion.
+- Phase 9E added authorization-code redirect/callback, PKCE, state and nonce transactions,
+  revocable sessions, audited membership administration, and production AWS KMS custody.
+
+## Still deferred
+
+- Invitation email delivery and IdP group synchronization
 - PostgreSQL row-level security as defense in depth
-- Managed secret rotation, quotas, and hosted trace export
+- Managed deployment automation, quotas, and hosted trace export

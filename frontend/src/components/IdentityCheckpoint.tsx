@@ -22,37 +22,56 @@ export function IdentityCheckpoint({
   personas,
   signingIn,
 }: IdentityCheckpointProps) {
+  const hostedIdentity = !loading && personas.length === 0;
+
   return (
     <main className="identity-shell">
       <header className="checkpoint-header">
         <span>PagerAgent / authority checkpoint</span>
-        <span>Local development only</span>
+        <span>{hostedIdentity ? "Hosted OIDC / PKCE" : "Local development only"}</span>
       </header>
 
       <section className="checkpoint-intro" aria-labelledby="checkpoint-title">
         <p className="eyebrow">Before the incident ledger opens</p>
         <h1 id="checkpoint-title">Choose who crosses the write boundary.</h1>
         <p>
-          Each persona receives a server-signed session, one organization scope, and an exact
+          Every operator receives a server-signed session, one organization scope, and an exact
           permission receipt. The UI never invents an operator identity.
         </p>
       </section>
 
-      <section className="persona-checkpoint" aria-label="Development personas">
+      <section
+        className="persona-checkpoint"
+        aria-label={hostedIdentity ? "Organization sign in" : "Development personas"}
+      >
         <header>
           <div>
-            <p className="utility-label">Scope / PagerAgent Labs</p>
-            <h2>Development identities</h2>
+            <p className="utility-label">
+              {hostedIdentity ? "Hosted identity boundary" : "Scope / PagerAgent Labs"}
+            </p>
+            <h2>{hostedIdentity ? "Organization identity" : "Development identities"}</h2>
           </div>
-          <span className="checkpoint-stamp">Not production auth</span>
+          <span className="checkpoint-stamp">
+            {hostedIdentity ? "Authorization code + PKCE" : "Not production auth"}
+          </span>
         </header>
 
         {loading ? <p className="checkpoint-message">Reading local identity fixtures…</p> : null}
-        {!loading && personas.length === 0 ? (
-          <p className="checkpoint-message">
-            Persona sign-in is disabled here. Complete sign-in through your deployment&apos;s OIDC
-            client, then return; a provider-specific redirect is not bundled with this dashboard.
-          </p>
+        {hostedIdentity ? (
+          <div className="hosted-identity-entry">
+            <div>
+              <p className="utility-label">Verified upstream · scoped downstream</p>
+              <h2>Continue with your organization.</h2>
+              <p>
+                Start the same-origin OIDC flow. PagerAgent returns with a revocable session bound
+                to your provisioned membership and active organization.
+              </p>
+            </div>
+            <a href="/api/v1/auth/oidc/login">
+              <span>Sign in with organization identity</span>
+              <small>Secure redirect →</small>
+            </a>
+          </div>
         ) : null}
         <div className="persona-list">
           {personas.map((persona, index) => (

@@ -13,3 +13,4 @@ INTERNAL_TOKEN_TYPE = "pageragent_session"
 CSRF_HEADER_NAME = "X-CSRF-Token"
 
 DEV_IDENTITY_ISSUER = "https://pageragent.local/dev"
+LOCAL_MEMBERSHIP_ISSUER = "https://identity.pageragent.local"

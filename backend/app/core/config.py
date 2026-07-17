@@ -26,7 +26,11 @@ class Settings(BaseSettings):
         validation_alias="PAGERAGENT_SESSION_SECRET",
     )
     session_cookie_name: str = Field(
-        default="pageragent_session", validation_alias="PAGERAGENT_SESSION_COOKIE_NAME"
+        default="pageragent_session",
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        validation_alias="PAGERAGENT_SESSION_COOKIE_NAME",
     )
     session_cookie_secure: bool = Field(
         default=False, validation_alias="PAGERAGENT_SESSION_COOKIE_SECURE"
@@ -37,6 +41,57 @@ class Settings(BaseSettings):
     oidc_issuer: str | None = Field(default=None, validation_alias="PAGERAGENT_OIDC_ISSUER")
     oidc_audience: str | None = Field(default=None, validation_alias="PAGERAGENT_OIDC_AUDIENCE")
     oidc_jwks_url: str | None = Field(default=None, validation_alias="PAGERAGENT_OIDC_JWKS_URL")
+    oidc_client_id: str | None = Field(
+        default=None, validation_alias="PAGERAGENT_OIDC_CLIENT_ID"
+    )
+    oidc_client_secret: SecretStr | None = Field(
+        default=None, validation_alias="PAGERAGENT_OIDC_CLIENT_SECRET"
+    )
+    oidc_authorization_url: str | None = Field(
+        default=None, validation_alias="PAGERAGENT_OIDC_AUTHORIZATION_URL"
+    )
+    oidc_token_url: str | None = Field(
+        default=None, validation_alias="PAGERAGENT_OIDC_TOKEN_URL"
+    )
+    oidc_redirect_uri: str | None = Field(
+        default=None, validation_alias="PAGERAGENT_OIDC_REDIRECT_URI"
+    )
+    oidc_frontend_url: str | None = Field(
+        default=None, validation_alias="PAGERAGENT_OIDC_FRONTEND_URL"
+    )
+    oidc_default_organization_slug: str | None = Field(
+        default=None,
+        validation_alias="PAGERAGENT_OIDC_DEFAULT_ORGANIZATION_SLUG",
+    )
+    oidc_transaction_key: SecretStr = Field(
+        default=SecretStr("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="),
+        validation_alias="PAGERAGENT_OIDC_TRANSACTION_KEY",
+    )
+    oidc_login_cookie_name: str = Field(
+        default="pageragent_oidc_login",
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        validation_alias="PAGERAGENT_OIDC_LOGIN_COOKIE_NAME",
+    )
+    oidc_login_ttl_seconds: int = Field(
+        default=300,
+        ge=60,
+        le=900,
+        validation_alias="PAGERAGENT_OIDC_LOGIN_TTL_SECONDS",
+    )
+    oidc_http_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=30,
+        validation_alias="PAGERAGENT_OIDC_HTTP_TIMEOUT_SECONDS",
+    )
+    oidc_max_response_bytes: int = Field(
+        default=262_144,
+        ge=1_024,
+        le=1_048_576,
+        validation_alias="PAGERAGENT_OIDC_MAX_RESPONSE_BYTES",
+    )
     ingest_api_key: SecretStr = Field(
         default=SecretStr("pageragent-local-ingest-key"),
         validation_alias="PAGERAGENT_INGEST_API_KEY",
@@ -44,6 +99,53 @@ class Settings(BaseSettings):
     ingest_organization_slug: str = Field(
         default="pageragent-labs",
         validation_alias="PAGERAGENT_INGEST_ORGANIZATION_SLUG",
+    )
+    connector_cipher_provider: Literal["local", "aws_kms"] = Field(
+        default="local",
+        validation_alias="PAGERAGENT_CONNECTOR_CIPHER_PROVIDER",
+    )
+    connector_kms_key_arn: str | None = Field(
+        default=None,
+        min_length=20,
+        max_length=2048,
+        validation_alias="PAGERAGENT_CONNECTOR_KMS_KEY_ARN",
+    )
+    connector_kms_region: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=64,
+        pattern=r"^[a-z0-9-]+$",
+        validation_alias="PAGERAGENT_CONNECTOR_KMS_REGION",
+    )
+    connector_kms_endpoint_url: str | None = Field(
+        default=None,
+        max_length=500,
+        validation_alias="PAGERAGENT_CONNECTOR_KMS_ENDPOINT_URL",
+    )
+    connector_kms_application_id: str = Field(
+        default="pageragent",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$",
+        validation_alias="PAGERAGENT_CONNECTOR_KMS_APPLICATION_ID",
+    )
+    connector_kms_connect_timeout_seconds: float = Field(
+        default=3.0,
+        gt=0,
+        le=30,
+        validation_alias="PAGERAGENT_CONNECTOR_KMS_CONNECT_TIMEOUT_SECONDS",
+    )
+    connector_kms_read_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=30,
+        validation_alias="PAGERAGENT_CONNECTOR_KMS_READ_TIMEOUT_SECONDS",
+    )
+    connector_kms_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        validation_alias="PAGERAGENT_CONNECTOR_KMS_MAX_ATTEMPTS",
     )
     connector_master_key: SecretStr = Field(
         default=SecretStr("fJIrHdOnYNQ6If5g9sz8nNVTsN2I6uav5FRHX24GQMs="),
@@ -219,6 +321,23 @@ class Settings(BaseSettings):
         if not self.connector_key_version.strip():
             raise ValueError("PAGERAGENT_CONNECTOR_KEY_VERSION must not be empty")
 
+        encoded_transaction_key = self.oidc_transaction_key.get_secret_value()
+        try:
+            decoded_transaction_key = b64decode(encoded_transaction_key, validate=True)
+        except (Base64DecodeError, ValueError) as error:
+            raise ValueError(
+                "PAGERAGENT_OIDC_TRANSACTION_KEY must be valid base64"
+            ) from error
+        if (
+            len(decoded_transaction_key) != 32
+            or b64encode(decoded_transaction_key).decode("ascii")
+            != encoded_transaction_key
+        ):
+            raise ValueError(
+                "PAGERAGENT_OIDC_TRANSACTION_KEY must be a canonical base64-encoded "
+                "32-byte key"
+            )
+
         def reject_duplicate_key_ids(pairs: list[tuple[str, object]]) -> dict[str, object]:
             result: dict[str, object] = {}
             for key_id, value in pairs:
@@ -314,6 +433,61 @@ class Settings(BaseSettings):
                 "PROMETHEUS_MAX_SAMPLES must hold at least one complete bounded series"
             )
 
+        kms_key_match = (
+            re.fullmatch(
+                r"arn:(aws|aws-us-gov|aws-cn):kms:([a-z0-9-]+):"
+                r"([0-9]{12}):key/([A-Za-z0-9-]{1,128})",
+                self.connector_kms_key_arn or "",
+            )
+            if self.connector_cipher_provider == "aws_kms"
+            else None
+        )
+        if self.connector_cipher_provider == "aws_kms" and (
+            kms_key_match is None
+            or not self.connector_kms_region
+            or kms_key_match.group(2) != self.connector_kms_region
+        ):
+            raise ValueError(
+                "AWS KMS connector custody requires an exact key ARN and matching region"
+            )
+        if self.connector_cipher_provider == "aws_kms" and (
+            re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}",
+                self.connector_kms_application_id,
+            )
+            is None
+            or re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}",
+                self.environment,
+            )
+            is None
+        ):
+            raise ValueError(
+                "AWS KMS encryption context identifiers use unsupported characters"
+            )
+        if self.connector_kms_endpoint_url is not None:
+            parsed_kms_endpoint = urlsplit(self.connector_kms_endpoint_url)
+            try:
+                parsed_kms_endpoint.port
+            except ValueError as error:
+                raise ValueError(
+                    "PAGERAGENT_CONNECTOR_KMS_ENDPOINT_URL contains an invalid port"
+                ) from error
+            if (
+                parsed_kms_endpoint.scheme not in {"http", "https"}
+                or not parsed_kms_endpoint.hostname
+                or parsed_kms_endpoint.username is not None
+                or parsed_kms_endpoint.password is not None
+                or parsed_kms_endpoint.path not in {"", "/"}
+                or parsed_kms_endpoint.query
+                or parsed_kms_endpoint.fragment
+                or self.connector_kms_endpoint_url
+                != f"{parsed_kms_endpoint.scheme}://{parsed_kms_endpoint.netloc}".rstrip("/")
+            ):
+                raise ValueError(
+                    "PAGERAGENT_CONNECTOR_KMS_ENDPOINT_URL must be an exact HTTP(S) origin"
+                )
+
         if self.environment.lower() in {"local", "test"}:
             return self
 
@@ -325,14 +499,55 @@ class Settings(BaseSettings):
             "PAGERAGENT_OIDC_ISSUER": self.oidc_issuer,
             "PAGERAGENT_OIDC_AUDIENCE": self.oidc_audience,
             "PAGERAGENT_OIDC_JWKS_URL": self.oidc_jwks_url,
+            "PAGERAGENT_OIDC_CLIENT_ID": self.oidc_client_id,
+            "PAGERAGENT_OIDC_CLIENT_SECRET": (
+                self.oidc_client_secret.get_secret_value()
+                if self.oidc_client_secret is not None
+                else None
+            ),
+            "PAGERAGENT_OIDC_AUTHORIZATION_URL": self.oidc_authorization_url,
+            "PAGERAGENT_OIDC_TOKEN_URL": self.oidc_token_url,
+            "PAGERAGENT_OIDC_REDIRECT_URI": self.oidc_redirect_uri,
+            "PAGERAGENT_OIDC_FRONTEND_URL": self.oidc_frontend_url,
+            "PAGERAGENT_OIDC_DEFAULT_ORGANIZATION_SLUG": (
+                self.oidc_default_organization_slug
+            ),
         }
         missing_oidc = [name for name, value in oidc_fields.items() if not value]
         if missing_oidc:
             errors.append(f"missing required OIDC settings: {', '.join(missing_oidc)}")
-        for name in ("PAGERAGENT_OIDC_ISSUER", "PAGERAGENT_OIDC_JWKS_URL"):
+        for name in (
+            "PAGERAGENT_OIDC_ISSUER",
+            "PAGERAGENT_OIDC_JWKS_URL",
+            "PAGERAGENT_OIDC_AUTHORIZATION_URL",
+            "PAGERAGENT_OIDC_TOKEN_URL",
+            "PAGERAGENT_OIDC_REDIRECT_URI",
+            "PAGERAGENT_OIDC_FRONTEND_URL",
+        ):
             value = oidc_fields[name]
-            if value and not value.startswith("https://"):
+            parsed = urlsplit(value) if value else None
+            if value and (
+                parsed is None
+                or parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+            ):
                 errors.append(f"{name} must use HTTPS")
+        if self.oidc_audience and self.oidc_client_id:
+            if self.oidc_audience != self.oidc_client_id:
+                errors.append(
+                    "PAGERAGENT_OIDC_AUDIENCE must equal PAGERAGENT_OIDC_CLIENT_ID"
+                )
+        if (
+            encoded_transaction_key
+            == "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+        ):
+            errors.append(
+                "PAGERAGENT_OIDC_TRANSACTION_KEY must be a non-development 32-byte key"
+            )
 
         session_secret = self.session_secret.get_secret_value()
         if (
@@ -350,17 +565,17 @@ class Settings(BaseSettings):
                 "PAGERAGENT_INGEST_API_KEY must be a non-development key of 32+ characters"
             )
 
-        if encoded_connector_key == "fJIrHdOnYNQ6If5g9sz8nNVTsN2I6uav5FRHX24GQMs=":
+        if self.connector_cipher_provider != "aws_kms":
             errors.append(
-                "PAGERAGENT_CONNECTOR_MASTER_KEY must be a non-development 32-byte key"
+                "PAGERAGENT_CONNECTOR_CIPHER_PROVIDER must be 'aws_kms'"
             )
-        if self.connector_key_version == "local-v1":
+        if self.connector_kms_endpoint_url is not None:
             errors.append(
-                "PAGERAGENT_CONNECTOR_KEY_VERSION must identify the production key"
+                "PAGERAGENT_CONNECTOR_KMS_ENDPOINT_URL is forbidden outside local/test"
             )
-        if "fJIrHdOnYNQ6If5g9sz8nNVTsN2I6uav5FRHX24GQMs=" in decryption_keys.values():
+        if decryption_keys:
             errors.append(
-                "PAGERAGENT_CONNECTOR_DECRYPTION_KEYS must not contain the development key"
+                "PAGERAGENT_CONNECTOR_DECRYPTION_KEYS must be empty with production KMS custody"
             )
         if any(not origin.startswith("https://") for origin in connector_origins):
             errors.append(
@@ -394,6 +609,37 @@ class Settings(BaseSettings):
 
         if not self.session_cookie_secure:
             errors.append("PAGERAGENT_SESSION_COOKIE_SECURE must be true")
+        if not self.session_cookie_name.startswith("__Host-"):
+            errors.append(
+                "PAGERAGENT_SESSION_COOKIE_NAME must use the __Host- prefix"
+            )
+        if not self.oidc_login_cookie_name.startswith("__Host-"):
+            errors.append(
+                "PAGERAGENT_OIDC_LOGIN_COOKIE_NAME must use the __Host- prefix"
+            )
+        if self.session_cookie_name == self.oidc_login_cookie_name:
+            errors.append("Session and OIDC login cookie names must be distinct")
+        redirect = urlsplit(self.oidc_redirect_uri or "")
+        if redirect.path != "/api/v1/auth/oidc/callback":
+            errors.append(
+                "PAGERAGENT_OIDC_REDIRECT_URI must use /api/v1/auth/oidc/callback"
+            )
+        frontend = urlsplit(self.oidc_frontend_url or "")
+        redirect_origin = (
+            redirect.scheme,
+            redirect.hostname,
+            redirect.port,
+        )
+        frontend_origin = (
+            frontend.scheme,
+            frontend.hostname,
+            frontend.port,
+        )
+        if redirect_origin != frontend_origin:
+            errors.append(
+                "PAGERAGENT_OIDC_REDIRECT_URI and PAGERAGENT_OIDC_FRONTEND_URL "
+                "must share one browser origin"
+            )
 
         origins = [origin.strip() for origin in self.backend_cors_origins.split(",")]
         if "*" in origins:

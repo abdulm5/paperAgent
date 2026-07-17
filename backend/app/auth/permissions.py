@@ -34,6 +34,8 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.ORGANIZATION_RESET,
             Permission.CONNECTORS_MANAGE,
             Permission.CONNECTORS_VALIDATE,
+            Permission.MEMBERSHIPS_READ,
+            Permission.MEMBERSHIPS_MANAGE,
         }
     ),
 }

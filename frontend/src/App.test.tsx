@@ -532,6 +532,7 @@ function errorResponse(status: number, detail: unknown): Response {
 
 let authenticated = true;
 let currentSession = authSession;
+let devPersonasAvailable = true;
 let transitionUnauthorized = false;
 let transitionForbidden: { code: string; message: string } | null = null;
 
@@ -573,6 +574,7 @@ class MockEventSource {
 beforeEach(() => {
   authenticated = true;
   currentSession = authSession;
+  devPersonasAvailable = true;
   transitionUnauthorized = false;
   transitionForbidden = null;
   MockEventSource.instances = [];
@@ -586,6 +588,7 @@ beforeEach(() => {
           : errorResponse(401, "Authentication required");
       }
       if (path.endsWith("/auth/dev/personas")) {
+        if (!devPersonasAvailable) return errorResponse(404, "Not found");
         return jsonResponse({
           personas: [
             {
@@ -904,6 +907,19 @@ test("signs in through the local identity checkpoint before loading tenant data"
     persona: "incident-commander",
     organization_slug: "pageragent-labs",
   });
+});
+
+test("offers the same-origin hosted OIDC entry point when dev personas are unavailable", async () => {
+  authenticated = false;
+  devPersonasAvailable = false;
+  render(<App />);
+
+  const oidcLogin = await screen.findByRole("link", {
+    name: /Sign in with organization identity/i,
+  });
+  expect(oidcLogin).toHaveAttribute("href", "/api/v1/auth/oidc/login");
+  expect(screen.getByRole("region", { name: "Organization sign in" })).toBeInTheDocument();
+  expect(screen.queryByText(/redirect is not bundled/i)).not.toBeInTheDocument();
 });
 
 test("shows exact read-only boundaries for a viewer and removes manual mitigation", async () => {

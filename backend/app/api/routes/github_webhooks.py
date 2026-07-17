@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.dependencies import require_permission
 from app.connectors.runtime import (
+    GithubConnectorCustodyUnavailableError,
     GithubConnectorUnavailableError,
     load_github_connector_runtime,
 )
@@ -51,6 +52,12 @@ async def ingest_github_webhook(
     raw_body = await read_limited_request_body(request)
     try:
         runtime = load_github_connector_runtime(session, connector_id)
+    except GithubConnectorCustodyUnavailableError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GitHub webhook credential custody is temporarily unavailable",
+            headers={"Retry-After": "5"},
+        ) from error
     except GithubConnectorUnavailableError as error:
         raise _webhook_not_found() from error
 

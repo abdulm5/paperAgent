@@ -54,7 +54,11 @@ export function EvaluationPanel({
             {scorecard.gates.map((gate) => (
               <div className={gate.passed ? "gate-pass" : "gate-fail"} key={gate.metric}>
                 <span>{titleCase(gate.metric)}</span>
-                <div><i style={{ width: percent(gate.value) }} /></div>
+                <progress
+                  aria-label={`${titleCase(gate.metric)} ${percent(gate.value)}`}
+                  max={1}
+                  value={gate.value}
+                />
                 <strong>{percent(gate.value)}</strong>
               </div>
             ))}

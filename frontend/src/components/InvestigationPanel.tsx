@@ -360,9 +360,12 @@ export function InvestigationPanel({
                     </div>
                     <span>{Math.round(candidate.total_score * 100)}%</span>
                   </div>
-                  <div className="score-track" aria-label={`${Math.round(candidate.total_score * 100)} percent suspicion score`}>
-                    <span style={{ width: `${candidate.total_score * 100}%` }} />
-                  </div>
+                  <progress
+                    aria-label={`${Math.round(candidate.total_score * 100)} percent suspicion score`}
+                    className="score-track"
+                    max={1}
+                    value={candidate.total_score}
+                  />
                   <ul className="reason-list">
                     {candidate.explanation.map((reason) => <li key={reason}>{reason}</li>)}
                   </ul>

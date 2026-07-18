@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pageragent-api
+  namespace: pageragent
+  labels:
+    app.kubernetes.io/name: pageragent-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: pageragent
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 300
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pageragent-api
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      annotations:
+        pageragent.dev/release-revision: scaffold
+        pageragent.dev/runtime-secret-revision: external-v1
+      labels:
+        app.kubernetes.io/name: pageragent-api
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: pageragent
+    spec:
+      serviceAccountName: pageragent-api
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: pageragent-backend:0.0.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: pageragent-runtime
+            - secretRef:
+                name: pageragent-database-secrets
+            - secretRef:
+                name: pageragent-transport-secrets
+            - secretRef:
+                name: pageragent-api-secrets
+            - secretRef:
+                name: pageragent-connector-secrets
+          env:
+            - name: SERVICE_NAME
+              value: pageragent-api
+            - name: OTEL_SERVICE_NAME
+              value: pageragent-api
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /api/v1/health/live
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: pageragent.example.com
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health/ready
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: pageragent.example.com
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health/live
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: pageragent.example.com
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: pageragent-api
+              app.kubernetes.io/component: api

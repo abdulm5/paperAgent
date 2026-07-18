@@ -7,7 +7,9 @@ import { IncidentQueue } from "./components/IncidentQueue";
 import { EvaluationPanel } from "./components/EvaluationPanel";
 import { IdentityCheckpoint } from "./components/IdentityCheckpoint";
 import { OrganizationAccessPanel } from "./components/OrganizationAccessPanel";
+import { ResponseProofRail } from "./components/ResponseProofRail";
 import {
+  advanceRequestScope,
   ApiError,
   createDevSession,
   decideCollaborationOutput,
@@ -58,6 +60,34 @@ const RECONCILIATION_INTERVAL_MS = 30_000;
 const SESSION_REVALIDATION_INTERVAL_MS = 15_000;
 const WORKFLOW_STREAM_URL = "/api/v1/workflows/events";
 type AuthStatus = "checking" | "signed_out" | "signed_in" | "switching";
+type IncidentResource =
+  | "detail"
+  | "investigation"
+  | "proposal"
+  | "collaboration"
+  | "postmortem"
+  | "workflows";
+type IncidentAction =
+  | "transition"
+  | "investigation"
+  | "proposal"
+  | "collaboration"
+  | "postmortem";
+
+interface IncidentScopeToken {
+  incidentId: string;
+  selectionGeneration: number;
+}
+
+interface ResourceRequestToken extends IncidentScopeToken {
+  requestGeneration: number;
+  resource: IncidentResource;
+}
+
+interface IncidentActionToken extends IncidentScopeToken {
+  action: IncidentAction;
+  actionGeneration: number;
+}
 
 function newestWorkflowFirst(left: WorkflowRun, right: WorkflowRun): number {
   return new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
@@ -88,6 +118,30 @@ export default function App() {
   const authenticatedOnceRef = useRef(false);
   const scopeActiveRef = useRef(false);
   const authorityRefreshInFlightRef = useRef(false);
+  const authorityGenerationRef = useRef(0);
+
+  const advanceAuthorityBoundary = useCallback((): number => {
+    advanceRequestScope();
+    scopeActiveRef.current = false;
+    authorityRefreshInFlightRef.current = false;
+    authorityGenerationRef.current += 1;
+    return authorityGenerationRef.current;
+  }, []);
+
+  const isCurrentAuthority = useCallback((generation: number): boolean => (
+    authorityGenerationRef.current === generation
+  ), []);
+
+  const commitAuthoritySession = useCallback((
+    nextSession: AuthSession,
+    generation: number,
+  ): boolean => {
+    if (!isCurrentAuthority(generation)) return false;
+    scopeActiveRef.current = true;
+    setSessionCsrfToken(nextSession.csrf_token);
+    setSession(nextSession);
+    return true;
+  }, [isCurrentAuthority]);
 
   const handleStreamChange = useCallback((stream: EventSource | null) => {
     streamRef.current = stream;
@@ -113,10 +167,11 @@ export default function App() {
   }, []);
 
   const handleUnauthorized = useCallback(() => {
-    scopeActiveRef.current = false;
+    advanceAuthorityBoundary();
     closeTenantStream();
     setSessionCsrfToken(null);
     setSession(null);
+    setSigningIn(null);
     setAuthStatus("signed_out");
     setAuthError(
       authenticatedOnceRef.current
@@ -124,19 +179,25 @@ export default function App() {
         : null,
     );
     void loadPersonas();
-  }, [closeTenantStream, loadPersonas]);
+  }, [advanceAuthorityBoundary, closeTenantStream, loadPersonas]);
 
   const handleForbidden = useCallback(() => {
     if (!scopeActiveRef.current || authorityRefreshInFlightRef.current) return;
+    const authorityGeneration = authorityGenerationRef.current;
     authorityRefreshInFlightRef.current = true;
     void getAuthSession()
       .then((nextSession) => {
-        if (!scopeActiveRef.current) return;
-        setSession(nextSession);
+        if (
+          !scopeActiveRef.current
+          || !commitAuthoritySession(nextSession, authorityGeneration)
+        ) return;
         setAuthError(null);
       })
       .catch((error) => {
-        if (!scopeActiveRef.current) return;
+        if (
+          !scopeActiveRef.current
+          || !isCurrentAuthority(authorityGeneration)
+        ) return;
         if (isSessionBoundaryError(error)) return;
         setAuthError(
           error instanceof Error
@@ -145,23 +206,26 @@ export default function App() {
         );
       })
       .finally(() => {
-        authorityRefreshInFlightRef.current = false;
+        if (isCurrentAuthority(authorityGeneration)) {
+          authorityRefreshInFlightRef.current = false;
+        }
       });
-  }, []);
+  }, [commitAuthoritySession, isCurrentAuthority]);
 
   useEffect(() => {
+    const authorityGeneration = advanceAuthorityBoundary();
     setSessionCsrfToken(null);
     setUnauthorizedHandler(handleUnauthorized);
     setForbiddenHandler(handleForbidden);
     void (async () => {
       try {
         const nextSession = await getAuthSession();
+        if (!commitAuthoritySession(nextSession, authorityGeneration)) return;
         authenticatedOnceRef.current = true;
-        scopeActiveRef.current = true;
-        setSession(nextSession);
         setAuthStatus("signed_in");
         setAuthError(null);
       } catch (error) {
+        if (!isCurrentAuthority(authorityGeneration)) return;
         if (!isSessionBoundaryError(error)) {
           setAuthStatus("signed_out");
           setAuthError(error instanceof Error ? error.message : "The identity service is unavailable.");
@@ -170,25 +234,40 @@ export default function App() {
       }
     })();
     return () => {
+      advanceAuthorityBoundary();
+      setSessionCsrfToken(null);
       setUnauthorizedHandler(null);
       setForbiddenHandler(null);
     };
-  }, [handleForbidden, handleUnauthorized, loadPersonas]);
+  }, [
+    advanceAuthorityBoundary,
+    commitAuthoritySession,
+    handleForbidden,
+    handleUnauthorized,
+    isCurrentAuthority,
+    loadPersonas,
+  ]);
 
   useEffect(() => {
     if (authStatus !== "signed_in") return;
     const timer = window.setInterval(() => {
       if (!scopeActiveRef.current) return;
+      const authorityGeneration = authorityGenerationRef.current;
       void getAuthSession()
         .then((nextSession) => {
-          if (scopeActiveRef.current) {
-            setSession(nextSession);
+          if (
+            scopeActiveRef.current
+            && commitAuthoritySession(nextSession, authorityGeneration)
+          ) {
             setAuthError(null);
           }
         })
         .catch((error) => {
           if (isSessionBoundaryError(error)) return;
-          if (scopeActiveRef.current) {
+          if (
+            scopeActiveRef.current
+            && isCurrentAuthority(authorityGeneration)
+          ) {
             setAuthError(
               error instanceof Error
                 ? `Session authority could not be revalidated: ${error.message}`
@@ -198,46 +277,52 @@ export default function App() {
         });
     }, SESSION_REVALIDATION_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [authStatus]);
+  }, [authStatus, commitAuthoritySession, isCurrentAuthority]);
 
   async function handleSignIn(persona: string) {
+    const authorityGeneration = advanceAuthorityBoundary();
+    setSessionCsrfToken(null);
     setSigningIn(persona);
     setAuthError(null);
     try {
       const nextSession = await createDevSession(persona);
+      if (!commitAuthoritySession(nextSession, authorityGeneration)) return;
       authenticatedOnceRef.current = true;
-      scopeActiveRef.current = true;
-      setSession(nextSession);
       setAuthStatus("signed_in");
     } catch (error) {
+      if (!isCurrentAuthority(authorityGeneration)) return;
       setAuthError(error instanceof Error ? error.message : "This identity could not be signed in.");
     } finally {
-      setSigningIn(null);
+      if (isCurrentAuthority(authorityGeneration)) setSigningIn(null);
     }
   }
 
   async function handleSwitchOrganization(organizationId: string) {
     if (!session || organizationId === session.active_organization.id) return;
-    scopeActiveRef.current = false;
+    const authorityGeneration = advanceAuthorityBoundary();
     closeTenantStream();
     setSession(null);
     setAuthStatus("switching");
     setAuthError(null);
     try {
-      const nextSession = await switchOrganization(organizationId);
-      scopeActiveRef.current = true;
-      setSession(nextSession);
+      const switchRequest = switchOrganization(organizationId);
+      setSessionCsrfToken(null);
+      const nextSession = await switchRequest;
+      if (!commitAuthoritySession(nextSession, authorityGeneration)) return;
       setAuthStatus("signed_in");
     } catch (error) {
+      if (!isCurrentAuthority(authorityGeneration)) return;
       if (isSessionBoundaryError(error)) return;
       setAuthError(error instanceof Error ? error.message : "Organization scope could not be changed.");
       try {
         const restoredSession = await getAuthSession();
-        scopeActiveRef.current = true;
-        setSession(restoredSession);
+        if (!commitAuthoritySession(restoredSession, authorityGeneration)) return;
         setAuthStatus("signed_in");
       } catch (sessionError) {
-        if (!isSessionBoundaryError(sessionError)) {
+        if (
+          isCurrentAuthority(authorityGeneration)
+          && !isSessionBoundaryError(sessionError)
+        ) {
           handleUnauthorized();
         }
       }
@@ -245,25 +330,31 @@ export default function App() {
   }
 
   async function handleLogout() {
-    scopeActiveRef.current = false;
+    const authorityGeneration = advanceAuthorityBoundary();
     closeTenantStream();
     setSession(null);
     setAuthStatus("switching");
     setAuthError(null);
     try {
-      await deleteAuthSession();
+      const logoutRequest = deleteAuthSession();
+      setSessionCsrfToken(null);
+      await logoutRequest;
+      if (!isCurrentAuthority(authorityGeneration)) return;
       setAuthStatus("signed_out");
       await loadPersonas();
     } catch (error) {
+      if (!isCurrentAuthority(authorityGeneration)) return;
       if (isSessionBoundaryError(error)) return;
       setAuthError(error instanceof Error ? error.message : "The session could not be closed.");
       try {
         const restoredSession = await getAuthSession();
-        scopeActiveRef.current = true;
-        setSession(restoredSession);
+        if (!commitAuthoritySession(restoredSession, authorityGeneration)) return;
         setAuthStatus("signed_in");
       } catch (sessionError) {
-        if (!isSessionBoundaryError(sessionError)) {
+        if (
+          isCurrentAuthority(authorityGeneration)
+          && !isSessionBoundaryError(sessionError)
+        ) {
           handleUnauthorized();
         }
       }
@@ -355,22 +446,94 @@ function IncidentLedger({
   const [workflowStreamStatus, setWorkflowStreamStatus] = useState<WorkflowStreamStatus>(
     () => (typeof EventSource === "undefined" ? "unsupported" : "connecting"),
   );
-  const selectedIdRef = useRef<string | null>(null);
-  selectedIdRef.current = selectedId;
+  const selectedIdRef = useRef<string | null>(selectedId);
+  const selectionGenerationRef = useRef(0);
+  const resourceGenerationRef = useRef<Record<IncidentResource, number>>({
+    detail: 0,
+    investigation: 0,
+    proposal: 0,
+    collaboration: 0,
+    postmortem: 0,
+    workflows: 0,
+  });
+  const actionGenerationRef = useRef<Record<IncidentAction, number>>({
+    transition: 0,
+    investigation: 0,
+    proposal: 0,
+    collaboration: 0,
+    postmortem: 0,
+  });
+  const queueRequestGenerationRef = useRef(0);
+  if (selectedIdRef.current !== selectedId) {
+    selectedIdRef.current = selectedId;
+    selectionGenerationRef.current += 1;
+  }
+
+  const beginResourceRequest = useCallback(
+    (resource: IncidentResource, incidentId: string): ResourceRequestToken => ({
+      incidentId,
+      resource,
+      selectionGeneration: selectionGenerationRef.current,
+      requestGeneration: ++resourceGenerationRef.current[resource],
+    }),
+    [],
+  );
+
+  const isCurrentScope = useCallback((token: IncidentScopeToken): boolean => (
+    selectedIdRef.current === token.incidentId
+    && selectionGenerationRef.current === token.selectionGeneration
+  ), []);
+
+  const isCurrentResourceRequest = useCallback((token: ResourceRequestToken): boolean => (
+    isCurrentScope(token)
+    && resourceGenerationRef.current[token.resource] === token.requestGeneration
+  ), [isCurrentScope]);
+
+  const beginIncidentAction = useCallback(
+    (action: IncidentAction, incidentId: string): IncidentActionToken => ({
+      action,
+      incidentId,
+      selectionGeneration: selectionGenerationRef.current,
+      actionGeneration: ++actionGenerationRef.current[action],
+    }),
+    [],
+  );
+
+  const isCurrentIncidentAction = useCallback((token: IncidentActionToken): boolean => (
+    isCurrentScope(token)
+    && actionGenerationRef.current[token.action] === token.actionGeneration
+  ), [isCurrentScope]);
+
+  const commitIncidentResource = useCallback(
+    (resource: IncidentResource, token: IncidentActionToken, apply: () => void): boolean => {
+      if (!isCurrentIncidentAction(token)) return false;
+      resourceGenerationRef.current[resource] += 1;
+      apply();
+      return true;
+    },
+    [isCurrentIncidentAction],
+  );
 
   const loadQueue = useCallback(async () => {
+    const requestGeneration = ++queueRequestGenerationRef.current;
     try {
       const nextIncidents = await getIncidents();
-      setIncidents(nextIncidents);
-      setSelectedId((current) => {
-        if (current && nextIncidents.some((incident) => incident.id === current)) return current;
-        return nextIncidents[0]?.id ?? null;
-      });
-      setConnectionError(null);
+      if (queueRequestGenerationRef.current === requestGeneration) {
+        setIncidents(nextIncidents);
+        setSelectedId((current) => {
+          if (current && nextIncidents.some((incident) => incident.id === current)) return current;
+          return nextIncidents[0]?.id ?? null;
+        });
+        setConnectionError(null);
+      }
     } catch (error) {
-      setConnectionError(error instanceof Error ? error.message : "PagerAgent API is unavailable.");
+      if (queueRequestGenerationRef.current === requestGeneration) {
+        setConnectionError(
+          error instanceof Error ? error.message : "PagerAgent API is unavailable.",
+        );
+      }
     } finally {
-      setLoadingQueue(false);
+      if (queueRequestGenerationRef.current === requestGeneration) setLoadingQueue(false);
     }
   }, []);
 
@@ -389,79 +552,111 @@ function IncidentLedger({
   }, []);
 
   const loadDetail = useCallback(async (incidentId: string) => {
+    const request = beginResourceRequest("detail", incidentId);
     setLoadingDetail(true);
     try {
-      setDetail(await getIncident(incidentId));
-      setConnectionError(null);
+      const nextDetail = await getIncident(incidentId);
+      if (isCurrentResourceRequest(request)) {
+        setDetail(nextDetail);
+        setConnectionError(null);
+      }
     } catch (error) {
-      setConnectionError(error instanceof Error ? error.message : "Incident evidence is unavailable.");
+      if (isCurrentResourceRequest(request)) {
+        setConnectionError(
+          error instanceof Error ? error.message : "Incident evidence is unavailable.",
+        );
+      }
     } finally {
-      setLoadingDetail(false);
+      if (isCurrentResourceRequest(request)) setLoadingDetail(false);
     }
-  }, []);
+  }, [beginResourceRequest, isCurrentResourceRequest]);
 
   const loadInvestigation = useCallback(async (incidentId: string) => {
+    const request = beginResourceRequest("investigation", incidentId);
     setInvestigationLoading(true);
     try {
-      setInvestigation(await getLatestInvestigation(incidentId));
-      setInvestigationError(null);
+      const nextInvestigation = await getLatestInvestigation(incidentId);
+      if (isCurrentResourceRequest(request)) {
+        setInvestigation(nextInvestigation);
+        setInvestigationError(null);
+      }
     } catch (error) {
-      setInvestigationError(
-        error instanceof Error ? error.message : "Investigation evidence is unavailable.",
-      );
+      if (isCurrentResourceRequest(request)) {
+        setInvestigationError(
+          error instanceof Error ? error.message : "Investigation evidence is unavailable.",
+        );
+      }
     } finally {
-      setInvestigationLoading(false);
+      if (isCurrentResourceRequest(request)) setInvestigationLoading(false);
     }
-  }, []);
+  }, [beginResourceRequest, isCurrentResourceRequest]);
 
   const loadProposal = useCallback(async (incidentId: string) => {
+    const request = beginResourceRequest("proposal", incidentId);
     setProposalLoading(true);
     try {
-      setProposal(await getLatestProposal(incidentId));
-      setProposalError(null);
+      const nextProposal = await getLatestProposal(incidentId);
+      if (isCurrentResourceRequest(request)) {
+        setProposal(nextProposal);
+        setProposalError(null);
+      }
     } catch (error) {
-      setProposalError(error instanceof Error ? error.message : "Copilot brief is unavailable.");
+      if (isCurrentResourceRequest(request)) {
+        setProposalError(
+          error instanceof Error ? error.message : "Copilot brief is unavailable.",
+        );
+      }
     } finally {
-      setProposalLoading(false);
+      if (isCurrentResourceRequest(request)) setProposalLoading(false);
     }
-  }, []);
+  }, [beginResourceRequest, isCurrentResourceRequest]);
 
   const loadCollaboration = useCallback(async (incidentId: string) => {
+    const request = beginResourceRequest("collaboration", incidentId);
     setCollaborationLoading(true);
     try {
       const nextOutputs = await getCollaborationOutputs(incidentId);
-      if (selectedIdRef.current === incidentId) {
+      if (isCurrentResourceRequest(request)) {
         setCollaborationOutputs(nextOutputs);
         setCollaborationError(null);
       }
     } catch (error) {
-      if (selectedIdRef.current === incidentId) {
+      if (isCurrentResourceRequest(request)) {
         setCollaborationError(
           error instanceof Error ? error.message : "Collaboration receipts are unavailable.",
         );
       }
     } finally {
-      if (selectedIdRef.current === incidentId) setCollaborationLoading(false);
+      if (isCurrentResourceRequest(request)) setCollaborationLoading(false);
     }
-  }, []);
+  }, [beginResourceRequest, isCurrentResourceRequest]);
 
   const loadPostmortem = useCallback(async (incidentId: string) => {
+    const request = beginResourceRequest("postmortem", incidentId);
     setPostmortemLoading(true);
     try {
-      setPostmortem(await getPostmortem(incidentId));
-      setPostmortemError(null);
+      const nextPostmortem = await getPostmortem(incidentId);
+      if (isCurrentResourceRequest(request)) {
+        setPostmortem(nextPostmortem);
+        setPostmortemError(null);
+      }
     } catch (error) {
-      setPostmortemError(error instanceof Error ? error.message : "Postmortem is unavailable.");
+      if (isCurrentResourceRequest(request)) {
+        setPostmortemError(
+          error instanceof Error ? error.message : "Postmortem is unavailable.",
+        );
+      }
     } finally {
-      setPostmortemLoading(false);
+      if (isCurrentResourceRequest(request)) setPostmortemLoading(false);
     }
-  }, []);
+  }, [beginResourceRequest, isCurrentResourceRequest]);
 
   const loadWorkflows = useCallback(async (incidentId: string) => {
+    const request = beginResourceRequest("workflows", incidentId);
     setWorkflowLoading(true);
     try {
       const nextWorkflows = await getIncidentWorkflows(incidentId);
-      if (selectedIdRef.current === incidentId) {
+      if (isCurrentResourceRequest(request)) {
         setWorkflows((current) => {
           const merged = new Map(nextWorkflows.map((workflow) => [workflow.id, workflow]));
           current.forEach((workflow) => {
@@ -473,15 +668,15 @@ function IncidentLedger({
         setWorkflowError(null);
       }
     } catch (error) {
-      if (selectedIdRef.current === incidentId) {
+      if (isCurrentResourceRequest(request)) {
         setWorkflowError(
           error instanceof Error ? error.message : "Durable workflow records are unavailable.",
         );
       }
     } finally {
-      if (selectedIdRef.current === incidentId) setWorkflowLoading(false);
+      if (isCurrentResourceRequest(request)) setWorkflowLoading(false);
     }
-  }, []);
+  }, [beginResourceRequest, isCurrentResourceRequest]);
 
   useEffect(() => {
     void loadQueue();
@@ -500,32 +695,36 @@ function IncidentLedger({
   }, [loadEvaluation, loadQueue, session]);
 
   useEffect(() => {
+    setDetail(null);
+    setLoadingDetail(false);
+    setTransitionError(null);
+    setTransitioning(false);
+    setInvestigation(null);
+    setInvestigationError(null);
+    setInvestigationLoading(false);
+    setInvestigationRunning(false);
+    setProposal(null);
+    setProposalError(null);
+    setProposalLoading(false);
+    setProposalActing(false);
+    setCollaborationOutputs([]);
+    setCollaborationError(null);
+    setCollaborationLoading(false);
+    setCollaborationActing(null);
+    setPostmortem(null);
+    setPostmortemError(null);
+    setPostmortemLoading(false);
+    setPostmortemActing(false);
+    setWorkflows([]);
+    setWorkflowError(null);
+    setWorkflowLoading(false);
     if (selectedId) {
-      setInvestigation(null);
-      setProposal(null);
-      setCollaborationOutputs([]);
-      setCollaborationError(null);
-      setCollaborationActing(null);
-      setPostmortem(null);
-      setWorkflows([]);
-      setWorkflowError(null);
       void loadDetail(selectedId);
       void loadInvestigation(selectedId);
       void loadProposal(selectedId);
       void loadCollaboration(selectedId);
       void loadPostmortem(selectedId);
       void loadWorkflows(selectedId);
-    } else {
-      setDetail(null);
-      setInvestigation(null);
-      setProposal(null);
-      setCollaborationOutputs([]);
-      setCollaborationError(null);
-      setCollaborationActing(null);
-      setCollaborationLoading(false);
-      setPostmortem(null);
-      setWorkflows([]);
-      setWorkflowError(null);
     }
   }, [loadCollaboration, loadDetail, loadInvestigation, loadPostmortem, loadProposal, loadWorkflows, selectedId]);
 
@@ -621,97 +820,119 @@ function IncidentLedger({
 
   async function handleTransition(toStatus: IncidentStatus, note: string) {
     if (!detail) return false;
+    const incidentId = detail.id;
+    const token = beginIncidentAction("transition", incidentId);
     setTransitioning(true);
     setTransitionError(null);
     try {
-      const updated = await transitionIncident(detail.id, toStatus, detail.version, note);
-      setDetail(updated);
+      const updated = await transitionIncident(incidentId, toStatus, detail.version, note);
+      const current = commitIncidentResource("detail", token, () => setDetail(updated));
       await loadQueue();
-      if (toStatus === "resolved") await loadPostmortem(detail.id);
+      if (
+        current
+        && toStatus === "resolved"
+        && isCurrentIncidentAction(token)
+      ) {
+        await loadPostmortem(incidentId);
+      }
       return true;
     } catch (error) {
-      if (!isSessionBoundaryError(error)) {
+      if (isCurrentIncidentAction(token) && !isSessionBoundaryError(error)) {
         setTransitionError(error instanceof Error ? error.message : "Status change failed.");
-        await loadDetail(detail.id);
+        await loadDetail(incidentId);
       }
       return false;
     } finally {
-      setTransitioning(false);
+      if (isCurrentIncidentAction(token)) setTransitioning(false);
     }
   }
 
   async function handleRunInvestigation() {
     if (!selectedId) return;
+    const incidentId = selectedId;
+    const token = beginIncidentAction("investigation", incidentId);
     setInvestigationRunning(true);
     setInvestigationError(null);
     try {
-      setInvestigation(await runInvestigation(selectedId));
-      await loadDetail(selectedId);
+      const updated = await runInvestigation(incidentId);
+      if (commitIncidentResource("investigation", token, () => setInvestigation(updated))) {
+        await loadDetail(incidentId);
+      }
     } catch (error) {
-      if (!isSessionBoundaryError(error)) {
+      if (isCurrentIncidentAction(token) && !isSessionBoundaryError(error)) {
         setInvestigationError(error instanceof Error ? error.message : "Investigation failed.");
       }
     } finally {
-      setInvestigationRunning(false);
+      if (isCurrentIncidentAction(token)) setInvestigationRunning(false);
     }
   }
 
   async function handleGenerateProposal() {
     if (!selectedId) return;
+    const incidentId = selectedId;
+    const token = beginIncidentAction("proposal", incidentId);
     setProposalActing(true);
     setProposalError(null);
     try {
-      setProposal(await generateProposal(selectedId));
-      await loadDetail(selectedId);
+      const updated = await generateProposal(incidentId);
+      if (commitIncidentResource("proposal", token, () => setProposal(updated))) {
+        await loadDetail(incidentId);
+      }
     } catch (error) {
-      if (!isSessionBoundaryError(error)) {
+      if (isCurrentIncidentAction(token) && !isSessionBoundaryError(error)) {
         setProposalError(error instanceof Error ? error.message : "Brief generation failed.");
       }
     } finally {
-      setProposalActing(false);
+      if (isCurrentIncidentAction(token)) setProposalActing(false);
     }
   }
 
   async function handleProposalDecision(decision: ProposalDecision, note: string) {
     if (!proposal || !selectedId) return;
+    const incidentId = selectedId;
+    const proposalSnapshot = proposal;
+    const token = beginIncidentAction("proposal", incidentId);
     setProposalActing(true);
     setProposalError(null);
     try {
-      setProposal(await decideProposal(proposal.id, decision, note));
-      await Promise.all([loadDetail(selectedId), loadQueue()]);
+      const updated = await decideProposal(proposalSnapshot.id, decision, note);
+      const current = commitIncidentResource("proposal", token, () => setProposal(updated));
+      await Promise.all([current ? loadDetail(incidentId) : Promise.resolve(), loadQueue()]);
     } catch (error) {
-      if (!isSessionBoundaryError(error)) {
+      if (isCurrentIncidentAction(token) && !isSessionBoundaryError(error)) {
         setProposalError(error instanceof Error ? error.message : "Decision could not be recorded.");
-        await loadProposal(selectedId);
+        await loadProposal(incidentId);
       }
     } finally {
-      setProposalActing(false);
+      if (isCurrentIncidentAction(token)) setProposalActing(false);
     }
   }
 
   async function handlePrepareCollaboration(kinds: CollaborationOutputKind[]) {
     if (!proposal || !selectedId) return;
     const incidentId = selectedId;
+    const proposalSnapshot = proposal;
+    const token = beginIncidentAction("collaboration", incidentId);
     setCollaborationActing("prepare");
     setCollaborationError(null);
     try {
-      const prepared = await prepareCollaborationOutputs(incidentId, proposal, kinds);
-      if (selectedIdRef.current === incidentId) {
+      const prepared = await prepareCollaborationOutputs(incidentId, proposalSnapshot, kinds);
+      commitIncidentResource("collaboration", token, () => {
         setCollaborationOutputs((current) => {
           const merged = new Map(current.map((output) => [output.id, output]));
           prepared.forEach((output) => merged.set(output.id, output));
           return [...merged.values()];
         });
-      }
+      });
     } catch (error) {
-      if (!isSessionBoundaryError(error)) {
+      if (isCurrentIncidentAction(token) && !isSessionBoundaryError(error)) {
         setCollaborationError(
           error instanceof Error ? error.message : "Collaboration drafts could not be prepared.",
         );
         await loadCollaboration(incidentId);
       }
     } finally {
-      if (selectedIdRef.current === incidentId) setCollaborationActing(null);
+      if (isCurrentIncidentAction(token)) setCollaborationActing(null);
     }
   }
 
@@ -722,75 +943,90 @@ function IncidentLedger({
   ) {
     if (!selectedId) return;
     const incidentId = selectedId;
+    const token = beginIncidentAction("collaboration", incidentId);
     setCollaborationActing(output.id);
     setCollaborationError(null);
     try {
       const updated = await decideCollaborationOutput(output, decision, note);
-      if (selectedIdRef.current === incidentId) {
+      const current = commitIncidentResource("collaboration", token, () => {
         setCollaborationOutputs((current) => current.map((candidate) => (
           candidate.id === updated.id ? updated : candidate
         )));
-      }
-      await loadWorkflows(incidentId);
+      });
+      if (current) await loadWorkflows(incidentId);
     } catch (error) {
-      if (!isSessionBoundaryError(error)) {
+      if (isCurrentIncidentAction(token) && !isSessionBoundaryError(error)) {
         setCollaborationError(
           error instanceof Error ? error.message : "Publication decision could not be recorded.",
         );
         await loadCollaboration(incidentId);
       }
     } finally {
-      if (selectedIdRef.current === incidentId) setCollaborationActing(null);
+      if (isCurrentIncidentAction(token)) setCollaborationActing(null);
     }
   }
 
   async function handleGeneratePostmortem() {
     if (!selectedId) return;
+    const incidentId = selectedId;
+    const token = beginIncidentAction("postmortem", incidentId);
     setPostmortemActing(true);
     setPostmortemError(null);
     try {
-      setPostmortem(await generatePostmortem(selectedId));
-      await loadDetail(selectedId);
+      const updated = await generatePostmortem(incidentId);
+      if (commitIncidentResource("postmortem", token, () => setPostmortem(updated))) {
+        await loadDetail(incidentId);
+      }
     } catch (error) {
-      if (!isSessionBoundaryError(error)) {
+      if (isCurrentIncidentAction(token) && !isSessionBoundaryError(error)) {
         setPostmortemError(error instanceof Error ? error.message : "Generation failed.");
       }
     } finally {
-      setPostmortemActing(false);
+      if (isCurrentIncidentAction(token)) setPostmortemActing(false);
     }
   }
 
   async function handleSavePostmortem(edit: PostmortemEditPayload) {
     if (!postmortem || !selectedId) return;
+    const incidentId = selectedId;
+    const postmortemSnapshot = postmortem;
+    const token = beginIncidentAction("postmortem", incidentId);
     setPostmortemActing(true);
     setPostmortemError(null);
     try {
-      setPostmortem(await updatePostmortem(postmortem, edit));
-      await loadDetail(selectedId);
+      const updated = await updatePostmortem(postmortemSnapshot, edit);
+      if (commitIncidentResource("postmortem", token, () => setPostmortem(updated))) {
+        await loadDetail(incidentId);
+      }
     } catch (error) {
-      if (!isSessionBoundaryError(error)) {
+      if (isCurrentIncidentAction(token) && !isSessionBoundaryError(error)) {
         setPostmortemError(error instanceof Error ? error.message : "Draft could not be saved.");
-        await loadPostmortem(selectedId);
+        await loadPostmortem(incidentId);
       }
     } finally {
-      setPostmortemActing(false);
+      if (isCurrentIncidentAction(token)) setPostmortemActing(false);
     }
   }
 
   async function handleFinalizePostmortem(note: string) {
     if (!postmortem || !selectedId) return;
+    const incidentId = selectedId;
+    const postmortemSnapshot = postmortem;
+    const token = beginIncidentAction("postmortem", incidentId);
     setPostmortemActing(true);
     setPostmortemError(null);
     try {
-      setPostmortem(await finalizePostmortem(postmortem, note));
-      await loadDetail(selectedId);
+      const updated = await finalizePostmortem(postmortemSnapshot, note);
+      if (commitIncidentResource("postmortem", token, () => setPostmortem(updated))) {
+        await loadDetail(incidentId);
+      }
     } catch (error) {
-      if (!isSessionBoundaryError(error)) {
+      if (isCurrentIncidentAction(token) && !isSessionBoundaryError(error)) {
         setPostmortemError(error instanceof Error ? error.message : "Finalization failed.");
-        await loadPostmortem(selectedId);
+        await loadPostmortem(incidentId);
       }
     } finally {
-      setPostmortemActing(false);
+      if (isCurrentIncidentAction(token)) setPostmortemActing(false);
     }
   }
 
@@ -853,6 +1089,13 @@ function IncidentLedger({
           <span>active incidents</span>
         </div>
       </section>
+
+      <ResponseProofRail
+        incident={detail}
+        investigation={investigation}
+        postmortem={postmortem}
+        proposal={proposal}
+      />
 
       <EvaluationPanel
         canRun={hasPermission(session, "evaluations.run")}

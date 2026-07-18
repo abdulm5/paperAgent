@@ -10,6 +10,12 @@ from urllib.parse import urlsplit
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.runtime_urls import (
+    is_reserved_public_host,
+    validate_production_database_url,
+    validate_production_redis_url,
+)
+
 
 class Settings(BaseSettings):
     """Runtime configuration loaded from environment variables."""
@@ -264,8 +270,32 @@ class Settings(BaseSettings):
         default="",
         validation_alias="PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS",
     )
-    database_url: str = "postgresql+psycopg://pageragent:pageragent@localhost:5432/pageragent"
-    redis_url: str = "redis://localhost:6379/0"
+    database_url: str = Field(
+        default="postgresql+psycopg://pageragent:pageragent@localhost:5432/pageragent",
+        validation_alias="DATABASE_URL",
+    )
+    database_connect_timeout_seconds: int = Field(
+        default=5,
+        ge=1,
+        le=30,
+        validation_alias="DATABASE_CONNECT_TIMEOUT_SECONDS",
+    )
+    database_pool_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=30,
+        validation_alias="DATABASE_POOL_TIMEOUT_SECONDS",
+    )
+    database_statement_timeout_ms: int = Field(
+        default=5_000,
+        ge=500,
+        le=30_000,
+        validation_alias="DATABASE_STATEMENT_TIMEOUT_MS",
+    )
+    redis_url: str = Field(
+        default="redis://localhost:6379/0",
+        validation_alias="REDIS_URL",
+    )
     workflow_stream_name: str = "pageragent.workflows"
     workflow_consumer_group: str = "pageragent-workers"
     workflow_dead_letter_stream: str = "pageragent.workflows.dlq"
@@ -275,9 +305,16 @@ class Settings(BaseSettings):
     workflow_poll_interval_seconds: float = 0.5
     workflow_retry_base_seconds: int = 2
     workflow_delivery_repair_seconds: int = 60
-    durable_mitigation_enabled: bool = False
+    durable_mitigation_enabled: bool = Field(
+        default=False,
+        validation_alias="DURABLE_MITIGATION_ENABLED",
+    )
     otel_console_exporter: bool = False
     backend_cors_origins: str = "http://localhost:5173"
+    backend_trusted_hosts: str = Field(
+        default="localhost,127.0.0.1,testserver,backend,pageragent.test",
+        validation_alias="PAGERAGENT_TRUSTED_HOSTS",
+    )
     runbook_directory: Path = Path("../runbooks")
     commit_fixture_path: Path = Path("../scenarios/checkout-commits.json")
     scenario_directory: Path = Path("../scenarios")
@@ -297,6 +334,13 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_environment(cls, value: object) -> object:
         return value.strip().lower() if isinstance(value, str) else value
+
+    @field_validator("backend_trusted_hosts", mode="before")
+    @classmethod
+    def normalize_trusted_hosts(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        return ",".join(host.strip().lower() for host in value.split(",") if host.strip())
 
     @model_validator(mode="after")
     def validate_production_identity_boundary(self) -> "Settings":
@@ -492,6 +536,110 @@ class Settings(BaseSettings):
             return self
 
         errors: list[str] = []
+        service_role = self.service_name.strip().lower()
+        supported_service_roles = {
+            "pageragent-api",
+            "pageragent-workflow-worker",
+            "pageragent-outbox-relay",
+            "pageragent-migration",
+        }
+        if service_role not in supported_service_roles:
+            errors.append(
+                "SERVICE_NAME must identify a supported production workload role"
+            )
+
+        try:
+            validate_production_database_url(self.database_url)
+        except ValueError as error:
+            errors.append(str(error))
+
+        if service_role != "pageragent-migration":
+            try:
+                validate_production_redis_url(self.redis_url)
+            except ValueError as error:
+                errors.append(str(error))
+
+        if self.durable_mitigation_enabled:
+            errors.append(
+                "DURABLE_MITIGATION_ENABLED must remain false until a production action "
+                "adapter has durable idempotency or target-state reconciliation"
+            )
+
+        # Background roles intentionally do not receive hosted browser/session
+        # credentials. Their startup contract ends after validating only the
+        # capabilities and stores they actually use.
+        if service_role in {"pageragent-migration", "pageragent-outbox-relay"}:
+            if self.connector_cipher_provider != "local":
+                errors.append(
+                    "Non-connector production workloads must explicitly disable KMS "
+                    "connector custody"
+                )
+            if errors:
+                raise ValueError("Unsafe production configuration: " + "; ".join(errors))
+            return self
+
+        if service_role == "pageragent-workflow-worker":
+            if self.connector_cipher_provider != "aws_kms":
+                errors.append(
+                    "PAGERAGENT_CONNECTOR_CIPHER_PROVIDER must be 'aws_kms'"
+                )
+            if self.connector_kms_endpoint_url is not None:
+                errors.append(
+                    "PAGERAGENT_CONNECTOR_KMS_ENDPOINT_URL is forbidden outside local/test"
+                )
+            if decryption_keys:
+                errors.append(
+                    "PAGERAGENT_CONNECTOR_DECRYPTION_KEYS must be empty with production "
+                    "KMS custody"
+                )
+            if any(not origin.startswith("https://") for origin in connector_origins):
+                errors.append(
+                    "PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS must contain only HTTPS origins"
+                )
+            if any(
+                is_reserved_public_host(urlsplit(origin).hostname or "")
+                for origin in connector_origins
+            ):
+                errors.append(
+                    "PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS must use non-reserved public hosts"
+                )
+            if self.github_evidence_mode != "connector":
+                errors.append(
+                    "GITHUB_EVIDENCE_MODE must be 'connector' outside local/test "
+                    "environments"
+                )
+            elif "https://api.github.com" not in connector_origins:
+                errors.append(
+                    "PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS must include "
+                    "https://api.github.com when GitHub connector evidence is enabled"
+                )
+            if self.prometheus_evidence_mode != "connector":
+                errors.append(
+                    "PROMETHEUS_EVIDENCE_MODE must be 'connector' outside local/test "
+                    "environments"
+                )
+            telemetry_origins = [
+                origin.strip()
+                for origin in self.investigation_telemetry_allowed_origins.split(",")
+                if origin.strip()
+            ]
+            if not telemetry_origins:
+                errors.append("PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS is required")
+            elif any(not origin.startswith("https://") for origin in telemetry_origins):
+                errors.append(
+                    "PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS must contain only HTTPS origins"
+                )
+            elif any(
+                is_reserved_public_host(urlsplit(origin).hostname or "")
+                for origin in telemetry_origins
+            ):
+                errors.append(
+                    "PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS must use non-reserved public hosts"
+                )
+            if errors:
+                raise ValueError("Unsafe production configuration: " + "; ".join(errors))
+            return self
+
         if self.auth_mode != "oidc":
             errors.append("PAGERAGENT_AUTH_MODE must be 'oidc'")
 
@@ -536,6 +684,10 @@ class Settings(BaseSettings):
                 or parsed.fragment
             ):
                 errors.append(f"{name} must use HTTPS")
+            elif value and parsed is not None and is_reserved_public_host(
+                parsed.hostname or ""
+            ):
+                errors.append(f"{name} must use a non-reserved public host")
         if self.oidc_audience and self.oidc_client_id:
             if self.oidc_audience != self.oidc_client_id:
                 errors.append(
@@ -564,6 +716,17 @@ class Settings(BaseSettings):
             errors.append(
                 "PAGERAGENT_INGEST_API_KEY must be a non-development key of 32+ characters"
             )
+        if ingest_key == session_secret:
+            errors.append(
+                "PAGERAGENT_SESSION_SECRET and PAGERAGENT_INGEST_API_KEY must be distinct"
+            )
+        if (
+            "ingest_organization_slug" not in self.model_fields_set
+            or not self.ingest_organization_slug.strip()
+        ):
+            errors.append(
+                "PAGERAGENT_INGEST_ORGANIZATION_SLUG must be explicitly configured"
+            )
 
         if self.connector_cipher_provider != "aws_kms":
             errors.append(
@@ -580,6 +743,13 @@ class Settings(BaseSettings):
         if any(not origin.startswith("https://") for origin in connector_origins):
             errors.append(
                 "PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS must contain only HTTPS origins"
+            )
+        if any(
+            is_reserved_public_host(urlsplit(origin).hostname or "")
+            for origin in connector_origins
+        ):
+            errors.append(
+                "PAGERAGENT_CONNECTOR_ALLOWED_ORIGINS must use non-reserved public hosts"
             )
         if self.github_evidence_mode != "connector":
             errors.append(
@@ -605,6 +775,13 @@ class Settings(BaseSettings):
         elif any(not origin.startswith("https://") for origin in telemetry_origins):
             errors.append(
                 "PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS must contain only HTTPS origins"
+            )
+        elif any(
+            is_reserved_public_host(urlsplit(origin).hostname or "")
+            for origin in telemetry_origins
+        ):
+            errors.append(
+                "PAGERAGENT_TELEMETRY_ALLOWED_ORIGINS must use non-reserved public hosts"
             )
 
         if not self.session_cookie_secure:
@@ -641,12 +818,41 @@ class Settings(BaseSettings):
                 "must share one browser origin"
             )
 
+        trusted_hosts = [
+            host.strip() for host in self.backend_trusted_hosts.split(",") if host.strip()
+        ]
+        if not trusted_hosts or any(
+            host == "*"
+            or re.fullmatch(
+                r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})\.)*"
+                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})",
+                host,
+            )
+            is None
+            for host in trusted_hosts
+        ):
+            errors.append(
+                "PAGERAGENT_TRUSTED_HOSTS must contain exact DNS names or IPv4 addresses"
+            )
+        elif any(is_reserved_public_host(host) for host in trusted_hosts):
+            errors.append(
+                "PAGERAGENT_TRUSTED_HOSTS must use non-reserved public hosts"
+            )
+        elif trusted_hosts != [(frontend.hostname or "").lower()]:
+            errors.append(
+                "PAGERAGENT_TRUSTED_HOSTS must contain only the exact OIDC frontend hostname"
+            )
+
         origins = [origin.strip() for origin in self.backend_cors_origins.split(",")]
         if "*" in origins:
             errors.append("BACKEND_CORS_ORIGINS cannot contain '*' when credentials are enabled")
         insecure_origins = [origin for origin in origins if not origin.startswith("https://")]
         if insecure_origins:
             errors.append("BACKEND_CORS_ORIGINS must contain only HTTPS origins")
+        if any(
+            is_reserved_public_host(urlsplit(origin).hostname or "") for origin in origins
+        ):
+            errors.append("BACKEND_CORS_ORIGINS must use non-reserved public hosts")
 
         if errors:
             raise ValueError("Unsafe production configuration: " + "; ".join(errors))

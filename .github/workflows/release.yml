@@ -1,0 +1,300 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE_NAME: ${{ github.repository_owner }}/pageragent-backend
+  FRONTEND_IMAGE_NAME: ${{ github.repository_owner }}/pageragent-frontend
+
+jobs:
+  validate-tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require a semantic release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tags must look like v1.2.3 or v1.2.3-rc.1" >&2
+            exit 1
+          fi
+
+  quality-gate:
+    needs: validate-tag
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  publish-backend:
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ github.ref_name }}
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.title=PagerAgent API and workers
+            org.opencontainers.image.description=Evidence-grounded incident response runtime
+      - id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: ./backend
+          target: production
+          platforms: linux/amd64,linux/arm64
+          build-contexts: |
+            runbooks=${{ github.workspace }}/runbooks
+            scenarios=${{ github.workspace }}/scenarios
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+          provenance: mode=max
+          sbom: true
+      - name: Block fixable HIGH and CRITICAL backend amd64 vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          scan-type: image
+          scanners: vuln
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+      - name: Block fixable HIGH and CRITICAL backend arm64 vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/arm64
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          scan-type: image
+          scanners: vuln
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+      - name: Sign backend image provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          # This repository is user-owned; linked-artifact storage records are org-only.
+          create-storage-record: false
+
+  publish-frontend:
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ github.ref_name }}
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.title=PagerAgent dashboard
+            org.opencontainers.image.description=PagerAgent incident response user interface
+      - id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: ./frontend
+          target: production
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+          provenance: mode=max
+          sbom: true
+      - name: Block fixable HIGH and CRITICAL frontend amd64 vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          scan-type: image
+          scanners: vuln
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+      - name: Block fixable HIGH and CRITICAL frontend arm64 vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/arm64
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          scan-type: image
+          scanners: vuln
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+      - name: Sign frontend image provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          # This repository is user-owned; linked-artifact storage records are org-only.
+          create-storage-record: false
+
+  release-bundle:
+    needs:
+      - publish-backend
+      - publish-frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      attestations: read
+      artifact-metadata: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.24.6"
+          cache: false
+      - name: Install release manifest tools
+        run: |
+          python -m pip install PyYAML==6.0.3
+          go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1
+      - name: Pin the release to immutable image digests
+        env:
+          BACKEND_IMAGE: ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE_NAME }}@${{ needs.publish-backend.outputs.digest }}
+          FRONTEND_IMAGE: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}@${{ needs.publish-frontend.outputs.digest }}
+        run: |
+          (cd deploy/kubernetes/migration && kustomize edit set image pageragent-backend="$BACKEND_IMAGE")
+          (cd deploy/kubernetes/workloads && kustomize edit set image pageragent-backend="$BACKEND_IMAGE" pageragent-frontend="$FRONTEND_IMAGE")
+          kustomize build deploy/kubernetes > pageragent-release.yaml
+          python deploy/validate_manifests.py pageragent-release.yaml
+      - name: Write release bill of materials
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          BACKEND_IMAGE: ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE_NAME }}@${{ needs.publish-backend.outputs.digest }}
+          FRONTEND_IMAGE: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}@${{ needs.publish-frontend.outputs.digest }}
+        run: |
+          RELEASE_REVISION="$(git rev-parse HEAD)"
+          {
+            printf 'release=%s\n' "$RELEASE_TAG"
+            printf 'revision=%s\n' "$RELEASE_REVISION"
+            printf 'backend_image=%s\n' "$BACKEND_IMAGE"
+            printf 'frontend_image=%s\n' "$FRONTEND_IMAGE"
+          } > release-metadata.txt
+      - name: Verify release assets before publication
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python deploy/verify_release.py \
+            --manifest pageragent-release.yaml \
+            --metadata release-metadata.txt \
+            --expected-tag "$RELEASE_TAG" \
+            --expected-revision "$(git rev-parse HEAD)" \
+            --repository "$GITHUB_REPOSITORY"
+      - name: Publish immutable GitHub Release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          release_flags=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            release_flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$RELEASE_TAG" \
+            pageragent-release.yaml \
+            release-metadata.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            "${release_flags[@]}"
+      - name: Require GitHub immutable-release verification
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"; then
+              gh release verify-asset "$RELEASE_TAG" pageragent-release.yaml \
+                --repo "$GITHUB_REPOSITORY"
+              gh release verify-asset "$RELEASE_TAG" release-metadata.txt \
+                --repo "$GITHUB_REPOSITORY"
+              exit 0
+            fi
+            if [[ "$attempt" == "6" ]]; then
+              echo "Release verification failed. Enable immutable releases for this repository." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pageragent-${{ github.ref_name }}
+          path: |
+            pageragent-release.yaml
+            release-metadata.txt
+          if-no-files-found: error
+          retention-days: 30

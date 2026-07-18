@@ -1,0 +1,238 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub Environment containing the cluster credentials and approvals
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      release_tag:
+        description: Published immutable release to promote (for example, v1.2.3)
+        required: true
+        type: string
+      runtime_secret_revision:
+        description: External secret-manager version or rotation identifier
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+  attestations: read
+  artifact-metadata: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - name: Validate the requested release tag
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "release_tag must look like v1.2.3 or v1.2.3-rc.1" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.release_tag }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.24.6"
+          cache: false
+      - name: Resolve the tag to its full source revision
+        id: source
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          release_revision="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          if [[ "$(git rev-parse HEAD)" != "$release_revision" ]]; then
+            echo "The checkout does not match refs/tags/$RELEASE_TAG" >&2
+            exit 1
+          fi
+          printf 'revision=%s\n' "$release_revision" >> "$GITHUB_OUTPUT"
+      - name: Install deployment tools
+        run: |
+          python -m pip install PyYAML==6.0.3
+          go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1
+      - name: Verify and download immutable GitHub Release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          mkdir -p "$RUNNER_TEMP/pageragent-release"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/pageragent-release" \
+            --pattern pageragent-release.yaml \
+            --pattern release-metadata.txt
+          gh release verify-asset "$RELEASE_TAG" \
+            "$RUNNER_TEMP/pageragent-release/pageragent-release.yaml" \
+            --repo "$GITHUB_REPOSITORY"
+          gh release verify-asset "$RELEASE_TAG" \
+            "$RUNNER_TEMP/pageragent-release/release-metadata.txt" \
+            --repo "$GITHUB_REPOSITORY"
+      - name: Bind release metadata, manifest, tag, and source revision
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_REVISION: ${{ steps.source.outputs.revision }}
+        run: |
+          python deploy/verify_release.py \
+            --manifest "$RUNNER_TEMP/pageragent-release/pageragent-release.yaml" \
+            --metadata "$RUNNER_TEMP/pageragent-release/release-metadata.txt" \
+            --expected-tag "$RELEASE_TAG" \
+            --expected-revision "$RELEASE_REVISION" \
+            --repository "$GITHUB_REPOSITORY" \
+            --github-output "$GITHUB_OUTPUT"
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify backend and frontend image provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.release }}
+          RELEASE_REVISION: ${{ steps.release.outputs.revision }}
+          BACKEND_IMAGE: ${{ steps.release.outputs.backend_image }}
+          FRONTEND_IMAGE: ${{ steps.release.outputs.frontend_image }}
+        run: |
+          signer_workflow="$GITHUB_REPOSITORY/.github/workflows/release.yml"
+          gh attestation verify "oci://$BACKEND_IMAGE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$signer_workflow" \
+            --source-ref "refs/tags/$RELEASE_TAG" \
+            --source-digest "$RELEASE_REVISION" \
+            --deny-self-hosted-runners
+          gh attestation verify "oci://$FRONTEND_IMAGE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$signer_workflow" \
+            --source-ref "refs/tags/$RELEASE_TAG" \
+            --source-digest "$RELEASE_REVISION" \
+            --deny-self-hosted-runners
+      - name: Configure cluster credentials
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64 }}
+        run: |
+          if [[ -z "$KUBE_CONFIG_B64" ]]; then
+            echo "The selected GitHub Environment must define KUBE_CONFIG_B64" >&2
+            exit 1
+          fi
+          printf '%s' "$KUBE_CONFIG_B64" | base64 --decode > "$RUNNER_TEMP/kubeconfig"
+          chmod 600 "$RUNNER_TEMP/kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+      - name: Render the immutable release
+        env:
+          BACKEND_IMAGE: ${{ steps.release.outputs.backend_image }}
+          FRONTEND_IMAGE: ${{ steps.release.outputs.frontend_image }}
+          RELEASE_REVISION: ${{ steps.release.outputs.revision }}
+          RUNTIME_SECRET_REVISION: ${{ inputs.runtime_secret_revision }}
+          PUBLIC_HOST: ${{ vars.PAGERAGENT_PUBLIC_HOST }}
+          PROMETHEUS_ORIGIN: ${{ vars.PAGERAGENT_PROMETHEUS_ORIGIN }}
+          TELEMETRY_ORIGIN: ${{ vars.PAGERAGENT_TELEMETRY_ORIGIN }}
+        run: |
+          python deploy/configure_environment.py \
+            --public-host "$PUBLIC_HOST" \
+            --prometheus-origin "$PROMETHEUS_ORIGIN" \
+            --telemetry-origin "$TELEMETRY_ORIGIN" \
+            --release-revision "$RELEASE_REVISION" \
+            --runtime-secret-revision "$RUNTIME_SECRET_REVISION"
+          (cd deploy/kubernetes/migration && kustomize edit set image pageragent-backend="$BACKEND_IMAGE")
+          (cd deploy/kubernetes/workloads && kustomize edit set image pageragent-backend="$BACKEND_IMAGE" pageragent-frontend="$FRONTEND_IMAGE")
+          kustomize build deploy/kubernetes > "$RUNNER_TEMP/pageragent-release.yaml"
+          python deploy/validate_manifests.py "$RUNNER_TEMP/pageragent-release.yaml"
+          if grep -q 'example\.com' "$RUNNER_TEMP/pageragent-release.yaml"; then
+            echo "Replace every example.com deployment value before deploying" >&2
+            exit 1
+          fi
+      - name: Apply cluster foundation
+        run: |
+          kubectl get secret pageragent-database-secrets --namespace pageragent >/dev/null
+          kubectl get secret pageragent-transport-secrets --namespace pageragent >/dev/null
+          kubectl get secret pageragent-api-secrets --namespace pageragent >/dev/null
+          kubectl get secret pageragent-connector-secrets --namespace pageragent >/dev/null
+          kubectl get secret pageragent-tls --namespace pageragent >/dev/null
+          kubectl apply -k deploy/kubernetes/foundation
+      - name: Run the schema migration gate
+        env:
+          BACKEND_IMAGE: ${{ steps.release.outputs.backend_image }}
+        run: |
+          (cd deploy/kubernetes/migration && kustomize edit set image pageragent-backend="$BACKEND_IMAGE")
+          kubectl delete job pageragent-migrate --namespace pageragent --ignore-not-found --wait=true
+          kubectl apply -k deploy/kubernetes/migration
+          if ! kubectl wait --for=condition=complete job/pageragent-migrate --namespace pageragent --timeout=600s; then
+            kubectl logs job/pageragent-migrate --namespace pageragent --all-containers=true || true
+            kubectl describe job pageragent-migrate --namespace pageragent || true
+            exit 1
+          fi
+      - name: Roll out API, workers, relay, and frontend
+        env:
+          BACKEND_IMAGE: ${{ steps.release.outputs.backend_image }}
+          FRONTEND_IMAGE: ${{ steps.release.outputs.frontend_image }}
+        run: |
+          (cd deploy/kubernetes/workloads && kustomize edit set image pageragent-backend="$BACKEND_IMAGE" pageragent-frontend="$FRONTEND_IMAGE")
+          kubectl apply -k deploy/kubernetes/workloads
+          kubectl rollout status deployment/pageragent-api --namespace pageragent --timeout=300s
+          kubectl rollout status deployment/pageragent-workflow-worker --namespace pageragent --timeout=300s
+          kubectl rollout status deployment/pageragent-outbox-relay --namespace pageragent --timeout=300s
+          kubectl rollout status deployment/pageragent-frontend --namespace pageragent --timeout=300s
+      - name: Verify the public HTTPS release path
+        env:
+          PUBLIC_HOST: ${{ vars.PAGERAGENT_PUBLIC_HOST }}
+        run: |
+          api_receipt="$RUNNER_TEMP/pageragent-api-ready.json"
+          for attempt in $(seq 1 20); do
+            if api_status="$(curl --fail --silent --show-error \
+              --connect-timeout 3 --max-time 5 \
+              --output "$api_receipt" --write-out '%{http_code}' \
+              "https://${PUBLIC_HOST}/api/v1/health/ready")" \
+              && [[ "$api_status" == "200" ]] \
+              && python - "$api_receipt" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          document = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          checks = document.get("checks") if isinstance(document, dict) else None
+          if not (
+              document.get("status") == "ready"
+              and document.get("environment") == "production"
+              and isinstance(checks, dict)
+              and checks.get("database") == "ok"
+              and checks.get("schema") in {"current", "forward_compatible"}
+          ):
+              raise SystemExit("public API readiness receipt does not match production")
+          PY
+            then
+              frontend_status="$(curl --fail --silent --show-error \
+                --connect-timeout 3 --max-time 5 \
+                --output /dev/null --write-out '%{http_code}' \
+                "https://${PUBLIC_HOST}/healthz")" || frontend_status=""
+              if [[ "$frontend_status" == "204" ]]; then
+                exit 0
+              fi
+            fi
+            if [[ "$attempt" == "20" ]]; then
+              echo "Public HTTPS API and dashboard smoke checks did not become ready" >&2
+              exit 1
+            fi
+            sleep 3
+          done

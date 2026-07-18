@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pageragent-workflow-worker
+  namespace: pageragent
+  labels:
+    app.kubernetes.io/name: pageragent-workflow-worker
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: pageragent
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 300
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pageragent-workflow-worker
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      annotations:
+        pageragent.dev/release-revision: scaffold
+        pageragent.dev/runtime-secret-revision: external-v1
+      labels:
+        app.kubernetes.io/name: pageragent-workflow-worker
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/part-of: pageragent
+    spec:
+      serviceAccountName: pageragent-workflow-worker
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: pageragent-backend:0.0.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - app.workflows.worker
+            - work
+          envFrom:
+            - configMapRef:
+                name: pageragent-runtime
+            - secretRef:
+                name: pageragent-database-secrets
+            - secretRef:
+                name: pageragent-transport-secrets
+            - secretRef:
+                name: pageragent-connector-secrets
+          env:
+            - name: SERVICE_NAME
+              value: pageragent-workflow-worker
+            - name: OTEL_SERVICE_NAME
+              value: pageragent-workflow-worker
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: pageragent-workflow-worker
+              app.kubernetes.io/component: worker

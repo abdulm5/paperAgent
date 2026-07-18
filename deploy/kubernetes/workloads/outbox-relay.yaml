@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pageragent-outbox-relay
+  namespace: pageragent
+  labels:
+    app.kubernetes.io/name: pageragent-outbox-relay
+    app.kubernetes.io/component: relay
+    app.kubernetes.io/part-of: pageragent
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 300
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pageragent-outbox-relay
+      app.kubernetes.io/component: relay
+  template:
+    metadata:
+      annotations:
+        pageragent.dev/release-revision: scaffold
+        pageragent.dev/runtime-secret-revision: external-v1
+      labels:
+        app.kubernetes.io/name: pageragent-outbox-relay
+        app.kubernetes.io/component: relay
+        app.kubernetes.io/part-of: pageragent
+    spec:
+      serviceAccountName: pageragent-outbox-relay
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: relay
+          image: pageragent-backend:0.0.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - app.workflows.worker
+            - relay
+          envFrom:
+            - configMapRef:
+                name: pageragent-runtime
+            - secretRef:
+                name: pageragent-database-secrets
+            - secretRef:
+                name: pageragent-transport-secrets
+          env:
+            - name: SERVICE_NAME
+              value: pageragent-outbox-relay
+            - name: OTEL_SERVICE_NAME
+              value: pageragent-outbox-relay
+            - name: PAGERAGENT_CONNECTOR_CIPHER_PROVIDER
+              value: local
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: pageragent-outbox-relay
+              app.kubernetes.io/component: relay

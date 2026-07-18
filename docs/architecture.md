@@ -78,10 +78,10 @@ Each credential revision is encrypted under a fresh random data-encryption key. 
 wraps that key with an exact-version AES-GCM key; production obtains and wraps it through AWS KMS
 `GenerateDataKey` under an exact key ARN and immutable tenant/connector/revision encryption context.
 Authenticated associated data binds the payload to that same context, so copied or edited rows fail
-closed. The SDK uses workload identity rather than configured static AWS credentials. KMS calls run
-outside database transactions and their results pass connector/credential revision checks before
-commit or runtime use. API responses and allowlisted audit payloads reveal field presence and
-revision only.
+closed. PagerAgent does not configure static AWS credentials; a production deployment is designed
+to supply the SDK credential chain through provider workload identity. KMS calls run outside
+database transactions and their results pass connector/credential revision checks before commit or
+runtime use. API responses and allowlisted audit payloads reveal field presence and revision only.
 The Phase 9A generic validation checked provider schema and vault integrity without making an
 external request. GitHub, Prometheus, and Slack validators now snapshot the connector and credential
 revision, end the database transaction, perform their bounded provider handshake, then lock and

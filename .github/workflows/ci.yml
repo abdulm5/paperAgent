@@ -2,20 +2,40 @@ name: ci
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
-      - run: pip install -r requirements-dev.txt
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Verify one migration head
+        run: test "$(alembic heads | wc -l | tr -d ' ')" = "1"
       - name: Verify migration upgrade, rollback, and recovery
         run: |
           alembic upgrade head
@@ -25,10 +45,11 @@ jobs:
           DATABASE_URL: sqlite+pysqlite:///./ci.db
       - name: Lint backend
         run: ruff check app tests migrations
-      - name: Validate demo shells
+      - name: Validate demo and release shells
         run: >-
           bash -n ../scripts/run-demo.sh ../scripts/run-durability-demo.sh
           ../scripts/run-connector-demo.sh ../scripts/run-github-evidence-demo.sh
+          ../scripts/seed-interview-demo.sh
       - name: Run durable workflow reliability tests
         run: pytest tests/test_workflows.py
       - name: Run remaining backend tests
@@ -36,17 +57,18 @@ jobs:
 
   workflow-integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_DB: pageragent
+          POSTGRES_DB: pageragent_release_test
           POSTGRES_USER: pageragent
           POSTGRES_PASSWORD: pageragent
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U pageragent -d pageragent"
+          --health-cmd "pg_isready -U pageragent -d pageragent_release_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -63,43 +85,142 @@ jobs:
       run:
         working-directory: backend
     env:
-      DATABASE_URL: postgresql+psycopg://pageragent:pageragent@localhost:5432/pageragent
+      DATABASE_URL: postgresql+psycopg://pageragent:pageragent@localhost:5432/pageragent_release_test
       REDIS_URL: redis://localhost:6379/15
       PAGERAGENT_INTEGRATION_TESTS: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
-      - run: pip install -r requirements-dev.txt
-      - run: alembic upgrade head
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Upgrade PostgreSQL schema
+        run: alembic upgrade head
       - name: Exercise PostgreSQL contention and Redis recovery
         run: pytest -q tests/integration
 
   simulator:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: simulator
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
-      - run: pip install -r requirements-dev.txt
+          cache: pip
+          cache-dependency-path: |
+            simulator/requirements.txt
+            simulator/requirements-dev.txt
+      - name: Install simulator dependencies
+        run: python -m pip install -r requirements-dev.txt
       - run: ruff check app tests
       - run: pytest
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
-      - run: npm install
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
       - run: npm test
       - run: npm run build
+
+  release-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.24.6"
+          cache: false
+      - name: Install manifest validators
+        run: |
+          python -m pip install PyYAML==6.0.3
+          go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1
+      - name: Render and validate Kubernetes release contract
+        run: |
+          kustomize build deploy/kubernetes > "$RUNNER_TEMP/pageragent.yaml"
+          python deploy/validate_manifests.py "$RUNNER_TEMP/pageragent.yaml"
+      - name: Validate local Compose contract
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+      - name: Build production backend image
+        run: >-
+          docker build --target production
+          --build-context runbooks=./runbooks
+          --build-context scenarios=./scenarios
+          --tag pageragent-backend:ci ./backend
+      - name: Build production frontend image
+        run: docker build --target production --tag pageragent-frontend:ci ./frontend
+      - name: Block fixable HIGH and CRITICAL backend vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: pageragent-backend:ci
+          scan-type: image
+          scanners: vuln
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+      - name: Block fixable HIGH and CRITICAL frontend vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: pageragent-frontend:ci
+          scan-type: image
+          scanners: vuln
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+      - name: Verify production containers use non-root users
+        run: |
+          test "$(docker image inspect pageragent-backend:ci --format '{{.Config.User}}')" = "10001:10001"
+          test "$(docker image inspect pageragent-frontend:ci --format '{{.Config.User}}')" = "101:101"
+      - name: Verify hosted dashboard response hardening
+        run: |
+          container_id="$(docker run --detach --publish 127.0.0.1:18080:8080 pageragent-frontend:ci)"
+          trap 'docker rm --force "$container_id" >/dev/null 2>&1 || true' EXIT
+          curl --fail --silent --show-error --retry 10 --retry-connrefused \
+            http://127.0.0.1:18080/healthz >/dev/null
+          headers="$(curl --fail --silent --show-error --head http://127.0.0.1:18080/)"
+          grep --ignore-case --quiet '^Content-Security-Policy:' <<<"$headers"
+          if grep --ignore-case --quiet '^Content-Security-Policy:.*unsafe-inline' <<<"$headers"; then
+            echo "Hosted dashboard CSP must not allow inline scripts or styles" >&2
+            exit 1
+          fi
+          grep --ignore-case --quiet '^Strict-Transport-Security:' <<<"$headers"
+          grep --ignore-case --quiet '^X-Content-Type-Options: nosniff' <<<"$headers"
+          grep --ignore-case --quiet '^X-Frame-Options: DENY' <<<"$headers"

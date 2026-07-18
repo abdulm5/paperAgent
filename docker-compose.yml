@@ -32,6 +32,9 @@ services:
     build:
       context: ./backend
       target: development
+      additional_contexts:
+        runbooks: ./runbooks
+        scenarios: ./scenarios
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     env_file: .env
     environment:
@@ -71,6 +74,9 @@ services:
     build:
       context: ./backend
       target: development
+      additional_contexts:
+        runbooks: ./runbooks
+        scenarios: ./scenarios
     command: python -m app.workflows.worker relay
     restart: unless-stopped
     env_file: .env
@@ -90,6 +96,9 @@ services:
     build:
       context: ./backend
       target: development
+      additional_contexts:
+        runbooks: ./runbooks
+        scenarios: ./scenarios
     command: python -m app.workflows.worker work
     restart: unless-stopped
     env_file: .env

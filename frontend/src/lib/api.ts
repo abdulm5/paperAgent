@@ -646,11 +646,17 @@ export class ApiError extends Error {
 let csrfToken: string | null = null;
 let unauthorizedHandler: (() => void) | null = null;
 let forbiddenHandler: ((error: ApiError) => void) | null = null;
+let requestScopeEpoch = 0;
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 export function setSessionCsrfToken(token: string | null): void {
   csrfToken = token;
+}
+
+export function advanceRequestScope(): number {
+  requestScopeEpoch += 1;
+  return requestScopeEpoch;
 }
 
 export function setUnauthorizedHandler(handler: (() => void) | null): void {
@@ -702,6 +708,7 @@ async function request<T>(
   init?: RequestInit,
   notifyUnauthorized = true,
 ): Promise<T> {
+  const scopeEpoch = requestScopeEpoch;
   const method = (init?.method ?? "GET").toUpperCase();
   const headers = new Headers(init?.headers);
   if (init?.body !== undefined && !headers.has("Content-Type")) {
@@ -718,7 +725,7 @@ async function request<T>(
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as ErrorEnvelope | null;
     const error = parseApiError(body, response.status);
-    if (notifyUnauthorized) {
+    if (notifyUnauthorized && scopeEpoch === requestScopeEpoch) {
       if (response.status === 401 || error.code === "membership_inactive") {
         unauthorizedHandler?.();
       } else if (response.status === 403) {
@@ -732,9 +739,7 @@ async function request<T>(
 }
 
 export async function getAuthSession(): Promise<AuthSession> {
-  const session = await request<AuthSession>("/api/v1/auth/session");
-  setSessionCsrfToken(session.csrf_token);
-  return session;
+  return request<AuthSession>("/api/v1/auth/session");
 }
 
 export async function getDevPersonas(): Promise<DevPersona[]> {
@@ -758,22 +763,18 @@ export async function createDevSession(
     },
     false,
   );
-  setSessionCsrfToken(response.session.csrf_token);
   return response.session;
 }
 
 export async function switchOrganization(organizationId: string): Promise<AuthSession> {
-  const session = await request<AuthSession>("/api/v1/auth/session/switch", {
+  return request<AuthSession>("/api/v1/auth/session/switch", {
     method: "POST",
     body: JSON.stringify({ organization_id: organizationId }),
   });
-  setSessionCsrfToken(session.csrf_token);
-  return session;
 }
 
 export async function deleteAuthSession(): Promise<void> {
   await request<void>("/api/v1/auth/session", { method: "DELETE" });
-  setSessionCsrfToken(null);
 }
 
 export function getMemberships(): Promise<MembershipDetail[]> {

@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pageragent
+resources:
+  - job.yaml
+images:
+  - name: pageragent-backend
+    newName: ghcr.io/replace-me/pageragent-backend
+    newTag: 0.0.0

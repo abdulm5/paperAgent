@@ -122,7 +122,8 @@ runtime snapshot → end DB transaction → KMS Decrypt + AES-GCM authenticate
 
 The local stack intentionally keeps `local-aesgcm-v1`; it proves the same cipher interface without
 requiring AWS credentials. A hosted deployment rotates connector credentials into KMS envelopes
-and uses workload identity. PagerAgent does not create IAM or KMS infrastructure.
+and is designed to receive AWS credentials from provider workload identity. PagerAgent does not
+create IAM, workload-identity, or KMS infrastructure.
 
 ## Production configuration contract
 
@@ -134,6 +135,8 @@ PAGERAGENT_AUTH_MODE=oidc
 PAGERAGENT_SESSION_COOKIE_SECURE=true
 PAGERAGENT_SESSION_COOKIE_NAME=__Host-pageragent_session
 PAGERAGENT_SESSION_SECRET=<managed-random-secret-at-least-32-characters>
+PAGERAGENT_INGEST_API_KEY=<different-managed-random-secret-at-least-32-characters>
+PAGERAGENT_INGEST_ORGANIZATION_SLUG=pageragent-production
 PAGERAGENT_OIDC_ISSUER=https://identity.example.com
 PAGERAGENT_OIDC_AUDIENCE=pageragent-web
 PAGERAGENT_OIDC_JWKS_URL=https://identity.example.com/.well-known/jwks.json
@@ -159,9 +162,11 @@ PAGERAGENT_CONNECTOR_DECRYPTION_KEYS={}
 The frontend and API are served through one browser origin so host-only `__Host-` cookies cover the
 relative API routes and callback without a parent-domain cookie. The full validator requires that
 shared origin, `__Host-` cookies, the exact callback path, production evidence
-modes, HTTPS connector/telemetry/CORS origins, and non-development ingest credentials. Custom KMS
-endpoints are local/test only. Apply an ingress rate limit to `/auth/oidc/login` in addition to the
-application's durable-state cap.
+modes, HTTPS connector/telemetry/CORS origins, and a non-development ingest credential distinct from
+the session secret. The server-owned ingest organization must exist and should match the bootstrapped
+organization unless responders are explicitly provisioned in both. Custom KMS endpoints are
+local/test only. Apply an ingress rate limit to `/auth/oidc/login` in addition to the application's
+durable-state cap.
 
 Run `python -m app.auth.maintenance` from a scheduled maintenance job to delete one bounded batch
 of expired/revoked identity state across all organizations. It is intentionally separate from the

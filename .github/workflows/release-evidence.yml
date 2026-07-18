@@ -1,0 +1,94 @@
+name: release-evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      requests:
+        description: Bounded alert-ingest request count
+        required: true
+        default: "120"
+        type: string
+      concurrency:
+        description: Bounded alert-ingest concurrency
+        required: true
+        default: "12"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-evidence-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  local-resilience-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      COMPOSE_PROJECT_NAME: pageragent-release-evidence
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Materialize deterministic local configuration
+        run: |
+          cp .env.example .env
+          mkdir -p release-evidence
+      - name: Start the isolated evidence stack
+        run: >-
+          docker compose --project-name pageragent-release-evidence up --detach --build
+          postgres redis checkout-api prometheus backend outbox-relay workflow-worker
+      - name: Wait for database and schema readiness
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8000/api/v1/health/ready \
+              | grep --quiet '"status":"ready"'; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose --project-name pageragent-release-evidence ps
+          exit 1
+      - name: Run bounded HTTP load and exact deduplication gate
+        env:
+          GATE_REQUESTS: ${{ inputs.requests }}
+          GATE_CONCURRENCY: ${{ inputs.concurrency }}
+        run: >-
+          python scripts/run-load-gate.py
+          --requests "$GATE_REQUESTS"
+          --concurrency "$GATE_CONCURRENCY"
+          --unique-fingerprints 24
+          --min-throughput-rps 2
+          --output release-evidence/load.json
+      - name: Run non-mutating HTTP security gate
+        run: >-
+          python scripts/run-security-gate.py
+          --output release-evidence/security.json
+      - name: Run exact outbox and worker recovery drill
+        run: >-
+          python scripts/run-chaos-drill.py
+          --confirm
+          --recovery-timeout-seconds 120
+          --output release-evidence/chaos.json
+      - name: Capture bounded service status on failure
+        if: failure()
+        run: |
+          docker compose --project-name pageragent-release-evidence ps \
+            > release-evidence/compose-status.txt
+          docker compose --project-name pageragent-release-evidence logs \
+            --no-color --tail 300 backend outbox-relay workflow-worker redis \
+            > release-evidence/failure-logs.txt
+      - name: Upload immutable run receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-evidence-${{ github.sha }}-${{ github.run_attempt }}
+          path: release-evidence/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Tear down the isolated evidence stack
+        if: always()
+        run: >-
+          docker compose --project-name pageragent-release-evidence down
+          --volumes --remove-orphans

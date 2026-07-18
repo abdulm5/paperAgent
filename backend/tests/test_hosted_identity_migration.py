@@ -101,7 +101,14 @@ def test_hosted_identity_and_kms_migration_round_trips_empty_sqlite(
         }
         assert credential_columns["cipher_scheme"]["nullable"] is False
         assert credential_columns["wrapped_key_nonce"]["nullable"] is True
-        assert _revision(engine) == "20260718_0012"
+        assert _revision(engine) == "20260718_0013"
+        contract = Table(
+            "pageragent_schema_contract",
+            MetaData(),
+            autoload_with=engine,
+        )
+        with engine.connect() as connection:
+            assert connection.execute(contract.select()).one().minimum_application_generation == 12
 
         command.downgrade(config, "20260717_0011")
         inspector = inspect(engine)
@@ -115,7 +122,7 @@ def test_hosted_identity_and_kms_migration_round_trips_empty_sqlite(
             for column in inspector.get_columns("organization_memberships")
         }
         command.upgrade(config, "head")
-        assert _revision(engine) == "20260718_0012"
+        assert _revision(engine) == "20260718_0013"
     finally:
         settings.database_url = previous_url
         if engine is not None:

@@ -1,0 +1,31 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pageragent
+  namespace: pageragent
+  labels:
+    app.kubernetes.io/name: pageragent
+    app.kubernetes.io/part-of: pageragent
+spec:
+  tls:
+    - hosts:
+        - pageragent.example.com
+      secretName: pageragent-tls
+  rules:
+    - host: pageragent.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: pageragent-api
+                port:
+                  name: http
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pageragent-frontend
+                port:
+                  name: http

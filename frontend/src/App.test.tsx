@@ -689,6 +689,259 @@ test("renders persisted incident evidence from the API", async () => {
   expect(document.querySelector(".queue-item.selected")).toHaveAttribute("aria-current", "true");
 });
 
+test("fences an A-to-B-to-A resource race with selection and request generations", async () => {
+  const secondSummary: IncidentSummary = {
+    ...summary,
+    id: "99999999-e415-4883-b09b-ca7d0ed4d604",
+    summary: "Payment gateway latency is above the release threshold.",
+    detected_at: "2026-07-10T00:49:45Z",
+    updated_at: "2026-07-10T00:49:45Z",
+  };
+  const secondDetail: IncidentDetail = {
+    ...detail,
+    ...secondSummary,
+    alert: {
+      ...detail.alert,
+      fingerprint: "payment-gateway:latency:provider-timeout",
+      summary: secondSummary.summary,
+      detected_at: secondSummary.detected_at,
+    },
+  };
+  const secondInvestigation: InvestigationDetail = {
+    ...investigation,
+    id: "88888888-bc8f-4ff3-a6d5-d898aca654ce",
+    incident_id: secondSummary.id,
+  };
+  const secondProposal: MitigationProposal = {
+    ...proposal,
+    id: "77777777-bc8f-4ff3-a6d5-d898aca654ce",
+    incident_id: secondSummary.id,
+    investigation_id: secondInvestigation.id,
+    root_cause_summary: "The selected incident is an upstream provider timeout.",
+  };
+  const refreshedFirstProposal: MitigationProposal = {
+    ...proposal,
+    id: "66666666-bc8f-4ff3-a6d5-d898aca654ce",
+    root_cause_summary: "The current checkout evidence was refreshed after reselection.",
+  };
+  let resolveFirstProposal!: (response: Response) => void;
+  const delayedFirstProposal = new Promise<Response>((resolve) => {
+    resolveFirstProposal = resolve;
+  });
+  const baselineFetch = vi.mocked(fetch).getMockImplementation();
+  expect(baselineFetch).toBeDefined();
+  let firstProposalReads = 0;
+  vi.mocked(fetch).mockImplementation((input, init) => {
+    const path = String(input);
+    if (path === "/api/v1/incidents") return Promise.resolve(jsonResponse([summary, secondSummary]));
+    if (path.endsWith(`/incidents/${summary.id}/proposals/latest`)) {
+      firstProposalReads += 1;
+      return firstProposalReads === 1
+        ? delayedFirstProposal
+        : Promise.resolve(jsonResponse(refreshedFirstProposal));
+    }
+    if (path.endsWith(`/incidents/${secondSummary.id}`)) {
+      return Promise.resolve(jsonResponse(secondDetail));
+    }
+    if (path.endsWith(`/incidents/${secondSummary.id}/investigations/latest`)) {
+      return Promise.resolve(jsonResponse(secondInvestigation));
+    }
+    if (path.endsWith(`/incidents/${secondSummary.id}/proposals/latest`)) {
+      return Promise.resolve(jsonResponse(secondProposal));
+    }
+    if (path.endsWith(`/incidents/${secondSummary.id}/workflows`)) {
+      return Promise.resolve(jsonResponse([]));
+    }
+    return baselineFetch!(input, init);
+  });
+
+  render(<App />);
+  await screen.findByRole("heading", { name: summary.summary });
+  fireEvent.click(
+    screen.getByRole("button", { name: new RegExp(secondSummary.summary) }),
+  );
+
+  expect(
+    await screen.findByRole("heading", { name: secondSummary.summary }),
+  ).toBeInTheDocument();
+  expect(await screen.findByText(secondProposal.root_cause_summary)).toBeInTheDocument();
+  expect(screen.getByText("case 99999999")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: new RegExp(summary.summary) }));
+  expect(await screen.findByRole("heading", { name: summary.summary })).toBeInTheDocument();
+  expect(
+    await screen.findByText(refreshedFirstProposal.root_cause_summary),
+  ).toBeInTheDocument();
+
+  await act(async () => resolveFirstProposal(jsonResponse(proposal)));
+
+  await waitFor(() => {
+    expect(screen.getByText(refreshedFirstProposal.root_cause_summary)).toBeInTheDocument();
+    expect(screen.queryByText(proposal.root_cause_summary)).not.toBeInTheDocument();
+  });
+});
+
+test("does not commit an incident action after its selection scope has changed", async () => {
+  const secondSummary: IncidentSummary = {
+    ...summary,
+    id: "99999999-e415-4883-b09b-ca7d0ed4d604",
+    summary: "Payment gateway latency is above the release threshold.",
+    detected_at: "2026-07-10T00:49:45Z",
+    updated_at: "2026-07-10T00:49:45Z",
+  };
+  const secondDetail: IncidentDetail = {
+    ...detail,
+    ...secondSummary,
+    alert: {
+      ...detail.alert,
+      fingerprint: "payment-gateway:latency:provider-timeout",
+      summary: secondSummary.summary,
+      detected_at: secondSummary.detected_at,
+    },
+  };
+  const secondInvestigation: InvestigationDetail = {
+    ...investigation,
+    id: "88888888-bc8f-4ff3-a6d5-d898aca654ce",
+    incident_id: secondSummary.id,
+    error_clusters: [
+      { ...investigation.error_clusters[0], error_type: "UpstreamTimeout" },
+    ],
+    cause_candidates: [
+      { ...investigation.cause_candidates[0], title: "Payment gateway timeout" },
+    ],
+  };
+  const staleActionResult: InvestigationDetail = {
+    ...investigation,
+    cause_candidates: [
+      { ...investigation.cause_candidates[0], title: "Stale checkout action result" },
+    ],
+  };
+  let resolveInvestigationAction!: (response: Response) => void;
+  const delayedInvestigationAction = new Promise<Response>((resolve) => {
+    resolveInvestigationAction = resolve;
+  });
+  const baselineFetch = vi.mocked(fetch).getMockImplementation();
+  expect(baselineFetch).toBeDefined();
+  vi.mocked(fetch).mockImplementation((input, init) => {
+    const path = String(input);
+    if (path === "/api/v1/incidents") return Promise.resolve(jsonResponse([summary, secondSummary]));
+    if (
+      path.endsWith(`/incidents/${summary.id}/investigations`)
+      && init?.method === "POST"
+    ) {
+      return delayedInvestigationAction;
+    }
+    if (path.endsWith(`/incidents/${secondSummary.id}`)) {
+      return Promise.resolve(jsonResponse(secondDetail));
+    }
+    if (path.endsWith(`/incidents/${secondSummary.id}/investigations/latest`)) {
+      return Promise.resolve(jsonResponse(secondInvestigation));
+    }
+    if (path.endsWith(`/incidents/${secondSummary.id}/workflows`)) {
+      return Promise.resolve(jsonResponse([]));
+    }
+    return baselineFetch!(input, init);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Rerun" }));
+  expect(screen.getByRole("button", { name: "Running…" })).toBeDisabled();
+
+  fireEvent.click(
+    screen.getByRole("button", { name: new RegExp(secondSummary.summary) }),
+  );
+  expect(await screen.findByText("Payment gateway timeout")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Rerun" })).toBeEnabled();
+
+  await act(async () => resolveInvestigationAction(jsonResponse(staleActionResult)));
+
+  await waitFor(() => {
+    expect(screen.getByText("Payment gateway timeout")).toBeInTheDocument();
+    expect(screen.queryByText("Stale checkout action result")).not.toBeInTheDocument();
+  });
+});
+
+test("does not start a transition follow-up after selection changes during queue refresh", async () => {
+  const secondSummary: IncidentSummary = {
+    ...summary,
+    id: "99999999-e415-4883-b09b-ca7d0ed4d604",
+    summary: "Payment gateway latency is above the release threshold.",
+    detected_at: "2026-07-10T00:49:45Z",
+    updated_at: "2026-07-10T00:49:45Z",
+  };
+  const secondDetail: IncidentDetail = {
+    ...detail,
+    ...secondSummary,
+    alert: {
+      ...detail.alert,
+      fingerprint: "payment-gateway:latency:provider-timeout",
+      summary: secondSummary.summary,
+      detected_at: secondSummary.detected_at,
+    },
+  };
+  const resolvableDetail: IncidentDetail = {
+    ...detail,
+    status: "mitigated",
+    version: 3,
+  };
+  let transitionReturned = false;
+  let resolveTransitionQueue!: (response: Response) => void;
+  let transitionQueueStarted = false;
+  let firstIncidentPostmortemReads = 0;
+  const delayedTransitionQueue = new Promise<Response>((resolve) => {
+    resolveTransitionQueue = resolve;
+  });
+  const baselineFetch = vi.mocked(fetch).getMockImplementation();
+  expect(baselineFetch).toBeDefined();
+  vi.mocked(fetch).mockImplementation((input, init) => {
+    const path = String(input);
+    if (path === "/api/v1/incidents") {
+      if (transitionReturned) {
+        transitionQueueStarted = true;
+        return delayedTransitionQueue;
+      }
+      return Promise.resolve(jsonResponse([summary, secondSummary]));
+    }
+    if (path.endsWith("/transitions") && init?.method === "POST") {
+      transitionReturned = true;
+      return Promise.resolve(
+        jsonResponse({ ...resolvableDetail, status: "resolved", version: 4 }),
+      );
+    }
+    if (path.endsWith(`/incidents/${summary.id}/postmortem`)) {
+      firstIncidentPostmortemReads += 1;
+    }
+    if (path.endsWith(`/incidents/${secondSummary.id}`)) {
+      return Promise.resolve(jsonResponse(secondDetail));
+    }
+    if (path.endsWith(`/incidents/${summary.id}`)) {
+      return Promise.resolve(jsonResponse(resolvableDetail));
+    }
+    if (path.endsWith(`/incidents/${secondSummary.id}/workflows`)) {
+      return Promise.resolve(jsonResponse([]));
+    }
+    return baselineFetch!(input, init);
+  });
+
+  render(<App />);
+  await screen.findByRole("heading", { name: summary.summary });
+  fireEvent.click(screen.getByRole("button", { name: "Resolve incident" }));
+  await waitFor(() => expect(transitionQueueStarted).toBe(true));
+
+  fireEvent.click(
+    screen.getByRole("button", { name: new RegExp(secondSummary.summary) }),
+  );
+  expect(await screen.findByRole("heading", { name: secondSummary.summary })).toBeInTheDocument();
+  const readsAfterSwitch = firstIncidentPostmortemReads;
+
+  await act(async () => resolveTransitionQueue(jsonResponse([summary, secondSummary])));
+
+  await waitFor(() => {
+    expect(screen.getByRole("heading", { name: secondSummary.summary })).toBeInTheDocument();
+    expect(firstIncidentPostmortemReads).toBe(readsAfterSwitch);
+  });
+});
+
 test("renders ranked GitHub App evidence and its immutable receipt without another request", async () => {
   render(<App />);
 
@@ -1023,4 +1276,63 @@ test("refreshes the authority receipt after an ordinary permission 403", async (
   expect(screen.getByRole("alert")).toHaveTextContent(
     "Missing permission: incidents.transition",
   );
+});
+
+test("fences a stale authority refresh across an organization switch", async () => {
+  let authSessionReads = 0;
+  let staleRefreshStarted = false;
+  let resolveStaleRefresh!: (response: Response) => void;
+  const delayedStaleRefresh = new Promise<Response>((resolve) => {
+    resolveStaleRefresh = resolve;
+  });
+  const baselineFetch = vi.mocked(fetch).getMockImplementation();
+  expect(baselineFetch).toBeDefined();
+  vi.mocked(fetch).mockImplementation((input, init) => {
+    const path = String(input);
+    if (path.endsWith("/auth/session") && (init?.method ?? "GET") === "GET") {
+      authSessionReads += 1;
+      if (authSessionReads === 2) {
+        staleRefreshStarted = true;
+        return delayedStaleRefresh;
+      }
+    }
+    return baselineFetch!(input, init);
+  });
+
+  render(<App />);
+  const transition = await screen.findByRole("button", { name: "Begin investigation" });
+  transitionForbidden = {
+    code: "permission_denied",
+    message: "Missing permission: incidents.transition",
+  };
+  fireEvent.click(transition);
+  await waitFor(() => expect(staleRefreshStarted).toBe(true));
+
+  fireEvent.change(screen.getByLabelText("Organization scope"), {
+    target: { value: sandboxSession.active_organization.id },
+  });
+  await waitFor(() => {
+    expect(screen.getByLabelText("Organization scope")).toHaveValue(
+      sandboxSession.active_organization.id,
+    );
+  });
+
+  await act(async () => resolveStaleRefresh(jsonResponse(authSession)));
+  await waitFor(() => {
+    expect(screen.getByLabelText("Organization scope")).toHaveValue(
+      sandboxSession.active_organization.id,
+    );
+  });
+
+  transitionForbidden = null;
+  fireEvent.click(await screen.findByRole("button", { name: "Begin investigation" }));
+  await waitFor(() => {
+    const transitionCalls = vi.mocked(fetch).mock.calls.filter(([input, requestInit]) => (
+      String(input).endsWith("/transitions") && requestInit?.method === "POST"
+    ));
+    expect(transitionCalls).toHaveLength(2);
+    expect(
+      new Headers(transitionCalls[1][1]?.headers).get("X-CSRF-Token"),
+    ).toBe(sandboxSession.csrf_token);
+  });
 });

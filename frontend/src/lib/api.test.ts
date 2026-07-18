@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from "vitest";
 
 import {
+  advanceRequestScope,
   createConnector,
   decideCollaborationOutput,
   decideProposal,
@@ -8,6 +9,7 @@ import {
   getConnector,
   getConnectorEvents,
   getConnectors,
+  getAuthSession,
   getIncidents,
   getCollaborationOutputs,
   prepareCollaborationOutputs,
@@ -26,10 +28,53 @@ import {
 } from "./api";
 
 afterEach(() => {
+  advanceRequestScope();
   setSessionCsrfToken(null);
   setForbiddenHandler(null);
   setUnauthorizedHandler(null);
   vi.unstubAllGlobals();
+});
+
+test("does not notify auth handlers for a response from an earlier request scope", async () => {
+  const unauthorized = vi.fn();
+  let resolveRequest!: (response: Response) => void;
+  const delayedResponse = new Promise<Response>((resolve) => {
+    resolveRequest = resolve;
+  });
+  setUnauthorizedHandler(unauthorized);
+  vi.stubGlobal("fetch", vi.fn(() => delayedResponse));
+
+  const incidents = getIncidents();
+  advanceRequestScope();
+  resolveRequest({
+    ok: false,
+    status: 401,
+    json: async () => ({ detail: "Authentication required" }),
+  } as Response);
+
+  await expect(incidents).rejects.toMatchObject({ status: 401 });
+  expect(unauthorized).not.toHaveBeenCalled();
+});
+
+test("keeps auth-session reads pure until the caller commits the CSRF token", async () => {
+  const fetchMock = vi.fn<
+    (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+  >(async (input) => ({
+      ok: true,
+      status: 200,
+      json: async () => String(input).endsWith("/auth/session")
+        ? { csrf_token: "uncommitted-new-token" }
+        : {},
+    } as Response));
+  vi.stubGlobal("fetch", fetchMock);
+  setSessionCsrfToken("committed-old-token");
+
+  await getAuthSession();
+  await transitionIncident("incident-1", "investigating", 1, "Scope proof");
+
+  expect(
+    new Headers(fetchMock.mock.calls[1][1]?.headers).get("X-CSRF-Token"),
+  ).toBe("committed-old-token");
 });
 
 test("uses the tenant-scoped connector custody contract and signs every write", async () => {

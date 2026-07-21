@@ -1,6 +1,6 @@
 alembic==1.15.2
 boto3==1.43.48
-fastapi==0.115.12
+fastapi==0.139.2
 httpx==0.28.1
 pydantic-settings==2.8.1
 PyJWT[crypto]==2.13.0

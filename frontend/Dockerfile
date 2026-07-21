@@ -15,7 +15,7 @@ FROM development AS build
 
 RUN npm run build
 
-FROM nginxinc/nginx-unprivileged:1.29.4-alpine AS production
+FROM nginxinc/nginx-unprivileged:1.31.3-alpine AS production
 
 COPY --chown=101:101 nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build --chown=101:101 /app/dist /usr/share/nginx/html
